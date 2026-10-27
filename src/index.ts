@@ -113,12 +113,29 @@ export function apply(ctx: any, config: any): void {
       db.close();
     }, "dsh-model-hub: teardown");
 
-    registerRecordsRoute(ctx, { query: (limit: number) => queryRecords(db, limit) });
+    // 路由必须用 ctx.inject 延迟注册 —— 本插件的 `inject` 只声明了 `llm`，
+    // 直接摸 `ctx.webServer` 会抛「cannot get property "webServer" without inject」，
+    // 而加载期抛错会让整个 host fatal 退出（实测踩过，会把 profile 打回默认）。
+    // 用 ctx.inject 的另一个好处：宿主没有 webServer 时只是不注册路由，插件照常工作。
+    try {
+      ctx.inject(["webServer"], (webCtx: any) => {
+        try {
+          registerRecordsRoute(webCtx, { query: (limit: number) => queryRecords(db, limit) });
+        } catch (caught) {
+          ctx.logger?.warn?.("dsh-model-hub: 记录路由注册失败（provider 不受影响）", caught);
+        }
+      });
+    } catch (caught) {
+      ctx.logger?.warn?.("dsh-model-hub: ctx.inject 不可用，记录路由跳过（provider 不受影响）", caught);
+    }
 
     ctx.logger?.info?.(
       `dsh-model-hub: 已注册 ${PROVIDER_GLOBAL}（${models.length} 个模型），shim=${shim.baseUrl()}`,
     );
-  })();
+  })().catch((caught: unknown) => {
+    // 异步体里任何逃逸的异常都不得冒到宿主加载期 —— 那会 fatal。
+    ctx.logger?.error?.("dsh-model-hub: 初始化失败（插件不生效，宿主不受影响）", caught);
+  });
 }
 
 /**

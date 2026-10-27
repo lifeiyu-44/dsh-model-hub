@@ -27,6 +27,11 @@ function hostIsLoopback(host: string | undefined): boolean {
  *
  * DSH 的插件路由没有独立鉴权（本机任意进程都能打），所以这里自己加一道
  * 回环校验。只读路由也校验 —— 请求记录里含模型名与用量，不该给外网看。
+ *
+ * ⚠️ 调用方必须先用 `ctx.inject(["webServer"], ...)` 拿到可用的 ctx 再调这里。
+ * 本插件的 `inject` 只声明了 `llm`；直接摸 `ctx.webServer` 会抛
+ * 「cannot get property "webServer" without inject」，而加载期抛出会让整个
+ * host fatal 退出（实测踩过，会把 profile 打回默认）。
  */
 export function registerRecordsRoute(ctx: WebServerContext, deps: { query(limit: number): unknown }): void {
   ctx.effect(() => {

@@ -4,9 +4,8 @@ import { resolveDshHome } from "@deepseek-ai/dsh-home-paths";
 import { Config } from "./config.js";
 import { HUB_DB_NAME, HUB_DIR_NAME, PROVIDER_PREFIX } from "./constants.js";
 import { openHubDatabase } from "./store/db.js";
-import { insertRequest, queryRecords } from "./store/requests.js";
+import { insertRequest } from "./store/requests.js";
 import { startShim } from "./shim/server.js";
-import { registerRecordsRoute } from "./routes/records.js";
 import { detectCredential } from "./channels/workbuddy/auth.js";
 import { readWorkbuddyVault } from "./channels/workbuddy/vault.js";
 import { fetchCatalog, upstreamBase, conversationIdentityHeaders } from "./channels/workbuddy/catalog.js";
@@ -18,6 +17,24 @@ export const inject = ["llm"];
 const PROVIDER_GLOBAL = `${PROVIDER_PREFIX}workbuddy-global`;
 
 export function apply(ctx: any, config: any): void {
+  // 最外层防线：apply() 内的任何同步异常都不得冒到 Cordis 加载期。
+  //
+  // 这不是防御性编程的洁癖 —— 实测代价是：加载期抛错 → host 以 exit 1 退出
+  // → DSH 判定 fatal 并**把整个 profile 重置为默认**（bundles 清空、
+  // cordis.patch.yml 被覆盖），用户原有的所有插件一次性停用。
+  // 插件自己坏掉可以接受，拖垮整个宿主不可接受。
+  try {
+    applyInner(ctx, config);
+  } catch (error) {
+    try {
+      ctx.logger?.error?.("dsh-model-hub: 插件初始化失败（不影响宿主与其它插件）", error);
+    } catch {
+      /* logger 也不可用时只能放弃记录 */
+    }
+  }
+}
+
+function applyInner(ctx: any, config: any): void {
   const settings = config ?? {};
   if (settings.enabled === false) return;
 
@@ -113,21 +130,17 @@ export function apply(ctx: any, config: any): void {
       db.close();
     }, "dsh-model-hub: teardown");
 
-    // 路由必须用 ctx.inject 延迟注册 —— 本插件的 `inject` 只声明了 `llm`，
-    // 直接摸 `ctx.webServer` 会抛「cannot get property "webServer" without inject」，
-    // 而加载期抛错会让整个 host fatal 退出（实测踩过，会把 profile 打回默认）。
-    // 用 ctx.inject 的另一个好处：宿主没有 webServer 时只是不注册路由，插件照常工作。
-    try {
-      ctx.inject(["webServer"], (webCtx: any) => {
-        try {
-          registerRecordsRoute(webCtx, { query: (limit: number) => queryRecords(db, limit) });
-        } catch (caught) {
-          ctx.logger?.warn?.("dsh-model-hub: 记录路由注册失败（provider 不受影响）", caught);
-        }
-      });
-    } catch (caught) {
-      ctx.logger?.warn?.("dsh-model-hub: ctx.inject 不可用，记录路由跳过（provider 不受影响）", caught);
-    }
+    // P0 不注册任何 HTTP 路由。
+    //
+    // 教训：`ctx.webServer` 的属性访问由插件的**静态** `inject` 数组把关，
+    // `ctx.inject(["webServer"], cb)` 只控制回调何时运行、**不授予属性访问权**。
+    // 在 `inject` 只有 `llm` 的情况下摸 `ctx.webServer` 会抛
+    // `cannot get property "webServer" without inject`，而该错误发生在加载期，
+    // 会让整个 host `exit 1`，进而触发 DSH 把 profile 重置为默认
+    // （bundles 清空、cordis.patch.yml 被覆盖）—— 实测踩过两次。
+    //
+    // 记录查询路由属于 P2 的面板功能，等真正做 UI 时再连同 `inject` 声明一起加。
+    // P0 的验证手段是直接读 SQLite，不需要 HTTP 接口。
 
     ctx.logger?.info?.(
       `dsh-model-hub: 已注册 ${PROVIDER_GLOBAL}（${models.length} 个模型），shim=${shim.baseUrl()}`,

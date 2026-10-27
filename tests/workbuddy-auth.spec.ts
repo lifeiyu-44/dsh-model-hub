@@ -16,8 +16,27 @@ describe("regionOfDomain", () => {
 });
 
 describe("parseAuthDocument", () => {
-  it("reads a plain-text token", () => {
-    const doc = JSON.stringify({ domain: "www.workbuddy.ai", accessToken: "tok-123", refreshToken: "ref-1", expiresAt: 1900000000000 });
+  it("reads the real nested structure (auth.accessToken / auth.domain)", () => {
+    const doc = JSON.stringify({
+      account: { uid: "u-1", nickname: { $wbEncrypted: 1, envelope: "nick" } },
+      auth: {
+        accessToken: "tok-abc",
+        refreshToken: "ref-abc",
+        domain: "www.workbuddy.ai",
+        expiresIn: 3600,
+        lastRefreshTime: 1793069057595,
+      },
+    });
+    const parsed = parseAuthDocument(doc);
+    expect(parsed.kind).toBe("plain");
+    expect(parsed.token).toBe("tok-abc");
+    expect(parsed.refreshToken).toBe("ref-abc");
+    expect(parsed.region).toBe("global");
+    expect(parsed.expiresAtMs).toBe(1793069057595 + 3600 * 1000);
+  });
+
+  it("still reads the legacy flat structure", () => {
+    const doc = JSON.stringify({ domain: "www.workbuddy.ai", accessToken: "tok-123", expiresAt: 1900000000000 });
     const parsed = parseAuthDocument(doc);
     expect(parsed.kind).toBe("plain");
     expect(parsed.token).toBe("tok-123");
@@ -26,7 +45,9 @@ describe("parseAuthDocument", () => {
   });
 
   it("reports an encrypted token as such instead of pretending it is empty", () => {
-    const doc = JSON.stringify({ domain: "www.workbuddy.ai", accessToken: { $wbEncrypted: 1, envelope: "abc" } });
+    const doc = JSON.stringify({
+      auth: { domain: "www.workbuddy.ai", accessToken: { $wbEncrypted: 1, envelope: "abc" } },
+    });
     const parsed = parseAuthDocument(doc);
     expect(parsed.kind).toBe("encrypted");
     expect(parsed.token).toBeUndefined();
@@ -36,6 +57,6 @@ describe("parseAuthDocument", () => {
   it("returns missing for malformed or empty documents", () => {
     expect(parseAuthDocument("not json").kind).toBe("missing");
     expect(parseAuthDocument("{}").kind).toBe("missing");
-    expect(parseAuthDocument(JSON.stringify({ accessToken: "" })).kind).toBe("missing");
+    expect(parseAuthDocument(JSON.stringify({ auth: { accessToken: "" } })).kind).toBe("missing");
   });
 });

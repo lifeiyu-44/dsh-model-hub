@@ -31,4 +31,18 @@ describe("parseSseLine", () => {
   it("ignores unparseable payloads instead of throwing", () => {
     expect(parseSseLine("data: {not json").done).toBe(false);
   });
+
+  it("treats usage: null as absent instead of crashing", () => {
+    // 实测 workbuddy 网关会在流式 chunk 里发 `"usage": null`。
+    // typeof null === 'object'，不单独判空就会在读字段时抛 TypeError 打断整条流。
+    expect(() => parseSseLine(`data: {"choices":[{"delta":{"content":"x"}}],"usage":null}`)).not.toThrow();
+    const r = parseSseLine(`data: {"choices":[{"delta":{"content":"x"}}],"usage":null}`);
+    expect(r.text).toBe("x");
+    expect(r.usage).toBeUndefined();
+  });
+
+  it("treats usage: [] as absent", () => {
+    const r = parseSseLine(`data: {"usage":[]}`);
+    expect(r.usage).toBeUndefined();
+  });
 });

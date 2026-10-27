@@ -8,7 +8,8 @@ import { insertRequest, queryRecords } from "./store/requests.js";
 import { startShim } from "./shim/server.js";
 import { registerRecordsRoute } from "./routes/records.js";
 import { detectCredential } from "./channels/workbuddy/auth.js";
-import { fetchCatalog, upstreamBase } from "./channels/workbuddy/catalog.js";
+import { readWorkbuddyVault } from "./channels/workbuddy/vault.js";
+import { fetchCatalog, upstreamBase, conversationIdentityHeaders } from "./channels/workbuddy/catalog.js";
 
 export const name = "dsh-model-hub";
 export { Config };
@@ -31,15 +32,34 @@ export function apply(ctx: any, config: any): void {
       return;
     }
 
-    const detected = detectCredential();
-    if (detected === undefined || detected.parsed.kind !== "plain" || detected.parsed.token === undefined) {
+    // 凭据来源按顺序试：
+    //   1. 桌面端 auth 文件里的**明文** token（旧版桌面端才这样）
+    //   2. dsh-connect-workbuddy 已解好的 vault（本机的实际情况 —— 桌面端
+    //      auth 是 AES 信封，而本机没装 WorkBuddy App，解不了）
+    // 两条都拿不到就如实报缺，不假装成功。
+    const fromFile = detectCredential();
+    const plainFromFile =
+      fromFile !== undefined && fromFile.parsed.kind === "plain" && fromFile.parsed.token !== undefined
+        ? { source: fromFile.path, parsed: fromFile.parsed }
+        : undefined;
+    const fromVault = plainFromFile === undefined ? readWorkbuddyVault() : undefined;
+    const credential = plainFromFile ?? fromVault;
+
+    if (credential === undefined) {
+      const why = fromFile === undefined
+        ? "没有找到任何 WorkBuddy 登录文件"
+        : fromFile.parsed.kind === "encrypted"
+          ? `桌面端凭据是加密信封（${fromFile.path}），且没有可复用的 vault`
+          : `凭据不可用（${fromFile.path}，状态 ${fromFile.parsed.kind}）`;
       ctx.logger?.warn?.(
-        `dsh-model-hub: 未找到可用的 WorkBuddy 明文凭据（探测结果：${detected?.parsed.kind ?? "missing"}，路径：${detected?.path ?? "无"}），渠道不注册`,
+        `dsh-model-hub: 未找到可用的 WorkBuddy token —— ${why}。请先装 WorkBuddy 桌面端登录一次，或装 dsh-connect-workbuddy 让它解一次。渠道不注册。`,
       );
       return;
     }
-    const token = detected.parsed.token;
-    const region = detected.parsed.region ?? "global";
+
+    const token = credential.parsed.token as string;
+    const region = credential.parsed.region ?? "global";
+    ctx.logger?.info?.(`dsh-model-hub: 凭据来源 = ${credential.source}（${region}）`);
 
     const models = await fetchCatalog(region, token).catch((error: unknown) => {
       ctx.logger?.warn?.("dsh-model-hub: 模型目录拉取失败，使用空目录", error);
@@ -49,7 +69,12 @@ export function apply(ctx: any, config: any): void {
     const shim = await startShim({
       prepare: async () => ({
         baseUrl: upstreamBase(region),
-        headers: { Authorization: `Bearer ${token}` },
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "User-Agent": "WorkBuddy/5.12.1 WorkBuddy/5.12.1 CLI/2.63.2",
+          // 每次请求现生成 —— 渠道校验认这三个头（实测，见 catalog.ts 的注释）。
+          ...conversationIdentityHeaders(),
+        },
       }),
       record: ({ metrics, statusCode, error, isStreaming, model }) => {
         if (settings.recordEnabled === false) return;

@@ -1,0 +1,497 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>dsh-model-hub · 界面原型</title>
+<style>
+/* ===== DSH 真实设计令牌（从 dsh-client-ui-theme/lib/client.js 抄的） ===== */
+:root{
+  --neutral-00:#fff; --neutral-50:#fafafa; --neutral-100:#f5f5f5; --neutral-150:#ededed;
+  --neutral-300:#d4d4d4; --neutral-400:#a3a3a3; --neutral-600:#6b6b6b; --neutral-700:#525252;
+  --neutral-850:#2c2c2e; --neutral-875:#232324; --neutral-900:#1b1b1c; --neutral-950:#151517;
+  --green-500:#22c55e; --red-600:#ec1313; --red-400:#f25a5a; --amber-500:#f59e0b;
+  --deepseek-500:#4176e6; --deepseek-400:#7aaaff; --deepseek-300:#b7c8fe; --deepseek-50:#edf3fe;
+}
+body{
+  --bg-base:var(--neutral-00); --bg-layer-2:var(--neutral-00); --bg-layer-3:var(--neutral-100);
+  --label-primary:var(--neutral-950); --label-secondary:var(--neutral-700); --label-tertiary:var(--neutral-600);
+  --label-quaternary:var(--neutral-400);
+  --border-l1:#0000000a; --border-l2:#00000014; --border-l3:#0000001f; --border-l4:#00000029;
+  --brand-primary:var(--neutral-950);
+  --state-success:var(--green-500); --state-error:var(--red-600); --state-warn:var(--amber-500);
+  --card-fill:var(--neutral-00); --card-stroke:var(--border-l4);
+  --hover:#0000000a; --selected:var(--deepseek-50); --accent-text:var(--deepseek-500);
+  --danger-text:var(--red-600);
+}
+body[data-ds-dark-theme]{
+  --bg-base:var(--neutral-950); --bg-layer-2:var(--neutral-850); --bg-layer-3:var(--neutral-875);
+  --label-primary:var(--neutral-50); --label-secondary:var(--neutral-300); --label-tertiary:var(--neutral-400);
+  --label-quaternary:var(--neutral-600);
+  --border-l1:#ffffff0f; --border-l2:#ffffff1a; --border-l3:#ffffff26; --border-l4:#ffffff33;
+  --brand-primary:var(--neutral-50);
+  --state-success:var(--green-500); --state-error:var(--red-400); --state-warn:var(--amber-500);
+  --card-fill:var(--neutral-850); --card-stroke:var(--border-l4);
+  --hover:#ffffff0d; --selected:#4176e61f; --accent-text:var(--deepseek-300);
+  --danger-text:#ff8080;
+}
+
+*{box-sizing:border-box;margin:0;padding:0}
+body{
+  background:var(--bg-base); color:var(--label-primary);
+  font:13px/1.5 -apple-system,"Segoe UI","Microsoft YaHei",system-ui,sans-serif;
+  padding:24px; min-height:100vh;
+}
+h1{font-size:15px;font-weight:600;margin-bottom:4px}
+.sub{color:var(--label-tertiary);font-size:12px;margin-bottom:20px}
+
+/* 视图切换 */
+.switcher{display:flex;gap:4px;margin-bottom:20px;padding:3px;background:var(--bg-layer-3);border-radius:8px;width:fit-content}
+.switcher button{
+  font:inherit;font-size:12px;padding:5px 14px;border:0;border-radius:6px;cursor:pointer;
+  background:transparent;color:var(--label-secondary);
+}
+.switcher button.on{background:var(--card-fill);color:var(--label-primary);box-shadow:0 1px 2px #0000001a}
+
+.view{display:none}
+.view.on{display:block}
+
+/* ===== 通用卡片 ===== */
+.card{
+  background:var(--card-fill);border:1px solid var(--card-stroke);
+  border-radius:10px;overflow:hidden;max-width:720px;
+}
+.card-head{padding:14px 16px;border-bottom:1px solid var(--border-l1);display:flex;align-items:center;justify-content:space-between}
+.card-title{font-size:13px;font-weight:600}
+.card-desc{font-size:11px;color:var(--label-tertiary);margin-top:2px}
+
+/* ===== tab ===== */
+.tabs{display:flex;gap:2px;padding:0 12px;border-bottom:1px solid var(--border-l1);background:var(--bg-layer-3)}
+.tabs button{
+  font:inherit;font-size:12px;padding:9px 12px;border:0;background:none;cursor:pointer;
+  color:var(--label-tertiary);border-bottom:2px solid transparent;margin-bottom:-1px;
+}
+.tabs button.on{color:var(--label-primary);border-bottom-color:var(--brand-primary);font-weight:500}
+.panel{display:none;padding:4px 0}
+.panel.on{display:block}
+
+/* ===== 行 ===== */
+.row{
+  display:flex;align-items:center;gap:12px;padding:11px 16px;
+  border-bottom:1px solid var(--border-l1);
+}
+.row:last-child{border-bottom:0}
+.row:hover{background:var(--hover)}
+.row-main{flex:1;min-width:0}
+.row-name{font-size:12.5px;display:flex;align-items:center;gap:7px}
+.row-meta{font-size:11px;color:var(--label-tertiary);margin-top:2px;font-variant-numeric:tabular-nums}
+.dot{width:6px;height:6px;border-radius:50%;flex:none}
+.dot.ok{background:var(--state-success)}
+.dot.err{background:var(--state-error)}
+.dot.warn{background:var(--state-warn)}
+.dot.off{background:var(--label-quaternary)}
+
+/* ===== 按钮 ===== */
+.btn{
+  font:inherit;font-size:11.5px;padding:4px 10px;border-radius:6px;cursor:pointer;
+  border:1px solid var(--border-l3);background:transparent;color:var(--label-secondary);white-space:nowrap;
+}
+.btn:hover{background:var(--hover);color:var(--label-primary)}
+.btn.primary{background:var(--brand-primary);color:var(--bg-base);border-color:transparent}
+.btn.primary:hover{opacity:.88}
+.btn.danger{color:var(--danger-text);border-color:color-mix(in srgb,var(--danger-text) 45%,transparent)}
+.btn.sm{padding:2px 7px;font-size:11px}
+
+/* ===== 徽标 ===== */
+.badge{
+  font-size:10.5px;padding:1px 6px;border-radius:4px;font-weight:500;
+  background:var(--bg-layer-3);color:var(--label-secondary);
+}
+.badge.cur{background:var(--selected);color:var(--accent-text)}
+.badge.free{background:color-mix(in srgb,var(--green-500) 16%,transparent);color:var(--state-success)}
+.badge.err{background:color-mix(in srgb,var(--state-error) 14%,transparent);color:var(--state-error)}
+
+/* ===== 开关 ===== */
+.sw{width:30px;height:17px;border-radius:9px;background:var(--border-l4);position:relative;flex:none;cursor:pointer;transition:background .15s}
+.sw.on{background:var(--state-success)}
+.sw::after{content:"";position:absolute;top:2px;left:2px;width:13px;height:13px;border-radius:50%;background:#fff;transition:transform .15s;box-shadow:0 1px 2px #0003}
+.sw.on::after{transform:translateX(13px)}
+
+/* ===== 表格 ===== */
+table{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums}
+th{
+  text-align:left;font-size:10.5px;font-weight:500;color:var(--label-tertiary);
+  padding:8px 10px;border-bottom:1px solid var(--border-l2);white-space:nowrap;
+  position:sticky;top:0;background:var(--card-fill);
+}
+th.num,td.num{text-align:right}
+td{padding:7px 10px;font-size:11.5px;border-bottom:1px solid var(--border-l1);white-space:nowrap}
+tbody tr:hover{background:var(--hover)}
+td.mono{font-family:ui-monospace,"Cascadia Mono",Consolas,monospace;font-size:11px}
+.tps{color:var(--state-success);font-weight:500}
+.tps.slow{color:var(--state-warn)}
+.tps.na{color:var(--label-tertiary);font-weight:400}
+
+/* ===== 侧边栏记录页 ===== */
+.sheet{
+  width:920px;max-width:100%;background:var(--bg-base);
+  border:1px solid var(--card-stroke);border-radius:10px;overflow:hidden;
+}
+.sheet-head{padding:14px 18px;border-bottom:1px solid var(--border-l1);display:flex;align-items:center;justify-content:space-between;gap:12px}
+.sheet-body{padding:0}
+.filters{display:flex;gap:6px;align-items:center;padding:10px 18px;border-bottom:1px solid var(--border-l1);flex-wrap:wrap}
+select{
+  font:inherit;font-size:11.5px;padding:4px 8px;border-radius:6px;
+  border:1px solid var(--border-l3);background:var(--card-fill);color:var(--label-primary);
+}
+.stat-row{display:flex;gap:0;border-bottom:1px solid var(--border-l1)}
+.stat{flex:1;padding:12px 18px;border-right:1px solid var(--border-l1)}
+.stat:last-child{border-right:0}
+.stat-k{font-size:10.5px;color:var(--label-tertiary);margin-bottom:3px}
+.stat-v{font-size:17px;font-weight:600;font-variant-numeric:tabular-nums;letter-spacing:-.3px}
+.stat-v small{font-size:11px;font-weight:400;color:var(--label-tertiary);margin-left:2px}
+.table-wrap{max-height:340px;overflow:auto}
+
+/* ===== 输入框胶囊 ===== */
+.composer-demo{
+  max-width:720px;border:1px solid var(--border-l3);border-radius:12px;
+  background:var(--card-fill);padding:10px 12px;
+}
+.composer-input{color:var(--label-tertiary);font-size:13px;padding:6px 2px 14px}
+.dock{display:flex;align-items:center;gap:8px;padding-top:8px;border-top:1px solid var(--border-l1)}
+.pill{
+  display:inline-flex;align-items:center;gap:6px;font-size:11px;
+  padding:3px 9px;border-radius:999px;background:var(--bg-layer-3);
+  color:var(--label-secondary);font-variant-numeric:tabular-nums;
+}
+.pill .live{width:5px;height:5px;border-radius:50%;background:var(--state-success);animation:pulse 1.4s ease-in-out infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.25}}
+.pill strong{font-weight:600;color:var(--label-primary)}
+.spacer{flex:1}
+
+/* ===== 诊断 ===== */
+.kv{display:grid;grid-template-columns:120px 1fr;gap:0;font-size:11.5px}
+.kv dt{padding:8px 16px;color:var(--label-tertiary);border-bottom:1px solid var(--border-l1)}
+.kv dd{padding:8px 16px;border-bottom:1px solid var(--border-l1);font-family:ui-monospace,"Cascadia Mono",Consolas,monospace;font-size:11px;word-break:break-all}
+.errbox{
+  margin:10px 16px 14px;padding:10px 12px;border-radius:8px;font-size:11px;
+  background:color-mix(in srgb,var(--state-error) 8%,transparent);
+  border:1px solid color-mix(in srgb,var(--state-error) 25%,transparent);
+  color:var(--label-secondary);font-family:ui-monospace,Consolas,monospace;line-height:1.6;
+}
+.note{font-size:11px;color:var(--label-tertiary);padding:10px 16px;line-height:1.6}
+</style>
+</head>
+<body data-ds-dark-theme>
+
+<h1>dsh-model-hub · 界面原型</h1>
+<div class="sub">深色主题（与你当前 DSH 一致）· 令牌取自 dsh-client-ui-theme 真实值 · 数据为示例</div>
+
+<div class="switcher">
+  <button class="on" data-v="v1">① 设置卡片</button>
+  <button data-v="v2">② 请求记录页</button>
+  <button data-v="v3">③ 输入框胶囊</button>
+</div>
+
+<!-- ========== ① 设置卡片 ========== -->
+<div class="view on" id="v1">
+<div class="card">
+  <div class="card-head">
+    <div>
+      <div class="card-title">Model Hub</div>
+      <div class="card-desc">三个平台的模型统一接入 · 凭据只读复用</div>
+    </div>
+    <button class="btn">一键认证</button>
+  </div>
+
+  <div class="tabs">
+    <button class="on" data-p="p1">账号</button>
+    <button data-p="p2">渠道</button>
+    <button data-p="p3">记录</button>
+    <button data-p="p4">诊断</button>
+  </div>
+
+  <!-- 账号 -->
+  <div class="panel on" id="p1">
+    <div class="row" style="background:var(--bg-layer-3);padding:7px 16px">
+      <div class="row-main"><span style="font-size:11px;color:var(--label-tertiary);font-weight:500">WorkBuddy</span></div>
+      <button class="btn sm">+ 添加账号</button>
+    </div>
+    <div class="row">
+      <span class="dot ok"></span>
+      <div class="row-main">
+        <div class="row-name">fuqinghe950917@gmail.com <span class="badge cur">当前</span></div>
+        <div class="row-meta">国际版 · 130 积分 · 今日 6 次 / 12.4k tokens</div>
+      </div>
+      <div class="sw on"></div>
+      <button class="btn sm">测试</button>
+      <button class="btn sm danger">删除</button>
+    </div>
+    <div class="row">
+      <span class="dot off"></span>
+      <div class="row-main">
+        <div class="row-name">workbuddy-cn（未登录）</div>
+        <div class="row-meta">国内版 · 未检测到登录态</div>
+      </div>
+      <div class="sw"></div>
+      <button class="btn sm">扫码登录</button>
+    </div>
+
+    <div class="row" style="background:var(--bg-layer-3);padding:7px 16px;border-top:1px solid var(--border-l2)">
+      <div class="row-main"><span style="font-size:11px;color:var(--label-tertiary);font-weight:500">ZCode（配置导入，5 个 provider）</span></div>
+      <button class="btn sm">重新导入</button>
+    </div>
+    <div class="row">
+      <span class="dot ok"></span>
+      <div class="row-main">
+        <div class="row-name">glemon <span class="badge">anthropic</span></div>
+        <div class="row-meta">api.glemon.cn · 4 个模型 · 凭据引用 ~/.zcode/v2/provider_config.json</div>
+      </div>
+      <div class="sw on"></div>
+      <button class="btn sm">测试</button>
+    </div>
+    <div class="row">
+      <span class="dot ok"></span>
+      <div class="row-main">
+        <div class="row-name">DeepSeek <span class="badge">api-key</span></div>
+        <div class="row-meta">api.deepseek.com · 2 个模型</div>
+      </div>
+      <div class="sw on"></div>
+      <button class="btn sm">测试</button>
+    </div>
+    <div class="row">
+      <span class="dot warn"></span>
+      <div class="row-main">
+        <div class="row-name">Qwen 阿里云百炼 <span class="badge">anthropic</span></div>
+        <div class="row-meta">token-plan.maas.qianwenaiapi.com · 13 个模型 · 上次失败：401</div>
+      </div>
+      <div class="sw"></div>
+      <button class="btn sm">测试</button>
+    </div>
+    <div class="row">
+      <span class="dot ok"></span>
+      <div class="row-main">
+        <div class="row-name">Strata <span class="badge">anthropic</span></div>
+        <div class="row-meta">123.57.163.149/strata/v1 · 2 个模型</div>
+      </div>
+      <div class="sw on"></div>
+      <button class="btn sm">测试</button>
+    </div>
+
+    <div class="row" style="background:var(--bg-layer-3);padding:7px 16px;border-top:1px solid var(--border-l2)">
+      <div class="row-main"><span style="font-size:11px;color:var(--label-tertiary);font-weight:500">Qoder CN</span></div>
+    </div>
+    <div class="row">
+      <span class="dot ok"></span>
+      <div class="row-main">
+        <div class="row-name">qoder1 <span class="badge free">免费 qfmodel / dfmodel</span></div>
+        <div class="row-meta">10 个模型 · 今日 100 Credits 待领</div>
+      </div>
+      <div class="sw on"></div>
+      <button class="btn sm">领取</button>
+    </div>
+  </div>
+
+  <!-- 渠道 -->
+  <div class="panel" id="p2">
+    <div class="row">
+      <div class="row-main">
+        <div class="row-name">WorkBuddy 国际版</div>
+        <div class="row-meta">www.workbuddy.ai · 25 个模型 · 已勾选 25</div>
+      </div>
+      <div class="sw on"></div>
+    </div>
+    <div class="row">
+      <div class="row-main">
+        <div class="row-name">WorkBuddy 国内版</div>
+        <div class="row-meta">copilot.tencent.com · 未登录，不列出模型</div>
+      </div>
+      <div class="sw"></div>
+    </div>
+    <div class="row">
+      <div class="row-main">
+        <div class="row-name">ZCode · glemon</div>
+        <div class="row-meta">api.glemon.cn · anthropic-messages</div>
+      </div>
+      <div class="sw on"></div>
+    </div>
+    <div class="row">
+      <div class="row-main">
+        <div class="row-name">ZCode · DeepSeek</div>
+        <div class="row-meta">api.deepseek.com · openai-responses</div>
+      </div>
+      <div class="sw on"></div>
+    </div>
+    <div class="row">
+      <div class="row-main">
+        <div class="row-name">Qoder CN</div>
+        <div class="row-meta">qoder.com.cn · COSY 签名 · 每日 100 Credits</div>
+      </div>
+      <div class="sw on"></div>
+    </div>
+    <div class="note">
+      渠道开关关闭后，该渠道的模型从模型选择器里彻底消失（不是藏起来），凭据保留，随时可以重新打开。
+    </div>
+  </div>
+
+  <!-- 记录（卡片内的摘要） -->
+  <div class="panel" id="p3">
+    <div class="row" style="justify-content:space-between">
+      <div class="row-main">
+        <div class="row-name">今日</div>
+        <div class="row-meta">42 次请求 · 1.24M tokens · 平均 47.3 tok/s</div>
+      </div>
+      <button class="btn sm">查看全部 →</button>
+    </div>
+    <table>
+      <thead><tr><th>时间</th><th>模型</th><th class="num">TTFT</th><th class="num">tok/s</th><th class="num">out</th></tr></thead>
+      <tbody>
+        <tr><td class="mono">16:31:02</td><td>deepseek-v4.1-flash</td><td class="num">412ms</td><td class="num tps">52.1</td><td class="num">1,284</td></tr>
+        <tr><td class="mono">16:28:44</td><td>deepseek-v4.1-flash</td><td class="num">389ms</td><td class="num tps">48.7</td><td class="num">932</td></tr>
+        <tr><td class="mono">16:24:11</td><td>glm-5.3</td><td class="num">1.2s</td><td class="num tps slow">21.4</td><td class="num">2,051</td></tr>
+        <tr><td class="mono">16:19:03</td><td>deepseek-v4.1-flash</td><td class="num">403ms</td><td class="num tps">55.9</td><td class="num">678</td></tr>
+      </tbody>
+    </table>
+    <div class="note">卡片里只放最近 4 条，完整记录在左侧栏「请求记录」页。</div>
+  </div>
+
+  <!-- 诊断 -->
+  <div class="panel" id="p4">
+    <dl class="kv">
+      <dt>插件版本</dt><dd>0.1.0</dd>
+      <dt>数据库</dt><dd>C:\Users\20260617\.dsh\model-hub\hub.db（WAL · 12.4 MB）</dd>
+      <dt>记录数</dt><dd>1,284 条 · 保留 90 天</dd>
+      <dt>当前渠道</dt><dd>hub-workbuddy-global</dd>
+      <dt>当前账号</dt><dd>fuqinghe950917@gmail.com</dd>
+      <dt>凭据路径</dt><dd>%LOCALAPPDATA%\CodeBuddyExtension\Data\Public\auth\workbuddy-desktop-ai.info</dd>
+      <dt>Token 有效期</dt><dd>2027-10-27 11:07（剩余 365 天）</dd>
+      <dt>上游最近错误</dt><dd style="color:var(--label-tertiary)">（无）</dd>
+    </dl>
+    <div class="note" style="padding-bottom:2px">上游最近一次错误的<strong>原文</strong>，不翻译不概括——这一栏存在的唯一理由就是能被整段贴进问题反馈。</div>
+    <div class="errbox">HTTP 429 · {"code":6004,"msg":"当前模型请求量已达上限，将在 2026-10-27 18:30:30 UTC+8 重置"}</div>
+  </div>
+</div>
+</div>
+
+<!-- ========== ② 请求记录页 ========== -->
+<div class="view" id="v2">
+<div class="sheet">
+  <div class="sheet-head">
+    <div>
+      <div class="card-title">请求记录</div>
+      <div class="card-desc">每一行是一次真实的模型调用</div>
+    </div>
+    <div style="display:flex;gap:6px">
+      <button class="btn">导出 CSV</button>
+      <button class="btn">刷新</button>
+    </div>
+  </div>
+
+  <div class="filters">
+    <select><option>全部渠道</option><option>hub-workbuddy-global</option><option>hub-zcode-glemon</option><option>hub-qoder-cn</option></select>
+    <select><option>全部模型</option><option>deepseek-v4.1-flash</option><option>glm-5.3</option></select>
+    <select><option>今天</option><option>最近 7 天</option><option>最近 30 天</option></select>
+    <span class="spacer"></span>
+    <span style="font-size:11px;color:var(--label-tertiary)">共 1,284 条</span>
+  </div>
+
+  <div class="stat-row">
+    <div class="stat"><div class="stat-k">请求数</div><div class="stat-v">42</div></div>
+    <div class="stat"><div class="stat-k">Tokens</div><div class="stat-v">1.24<small>M</small></div></div>
+    <div class="stat"><div class="stat-k">平均 TTFT</div><div class="stat-v">398<small>ms</small></div></div>
+    <div class="stat"><div class="stat-k">平均速度</div><div class="stat-v">47.3<small>tok/s</small></div></div>
+    <div class="stat"><div class="stat-k">积分消耗</div><div class="stat-v">0<small>（免费模型）</small></div></div>
+  </div>
+
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>时间</th><th>渠道</th><th>模型</th>
+          <th class="num">in</th><th class="num">out</th><th class="num">cache</th>
+          <th class="num">TTFT</th><th class="num">tok/s</th><th class="num">耗时</th><th>状态</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr><td class="mono">16:31:02</td><td>WB-Global</td><td>deepseek-v4.1-flash</td><td class="num">8,412</td><td class="num">1,284</td><td class="num">6,144</td><td class="num">412ms</td><td class="num tps">52.1</td><td class="num">24.6s</td><td><span class="badge free">200</span></td></tr>
+        <tr><td class="mono">16:28:44</td><td>WB-Global</td><td>deepseek-v4.1-flash</td><td class="num">5,201</td><td class="num">932</td><td class="num">4,096</td><td class="num">389ms</td><td class="num tps">48.7</td><td class="num">19.1s</td><td><span class="badge free">200</span></td></tr>
+        <tr><td class="mono">16:24:11</td><td>ZCode · glemon</td><td>glm-5.3</td><td class="num">12,844</td><td class="num">2,051</td><td class="num">0</td><td class="num">1.2s</td><td class="num tps slow">21.4</td><td class="num">95.8s</td><td><span class="badge free">200</span></td></tr>
+        <tr><td class="mono">16:19:03</td><td>WB-Global</td><td>deepseek-v4.1-flash</td><td class="num">3,887</td><td class="num">678</td><td class="num">2,048</td><td class="num">403ms</td><td class="num tps">55.9</td><td class="num">12.1s</td><td><span class="badge free">200</span></td></tr>
+        <tr><td class="mono">16:14:55</td><td>Qoder CN</td><td>qfmodel</td><td class="num">2,104</td><td class="num">445</td><td class="num">0</td><td class="num">612ms</td><td class="num tps">38.2</td><td class="num">11.6s</td><td><span class="badge free">200</span></td></tr>
+        <tr><td class="mono">16:11:20</td><td>WB-Global</td><td>hy3</td><td class="num">1,982</td><td class="num">1,204</td><td class="num">0</td><td class="num">1.8s</td><td class="num tps slow">17.9</td><td class="num">67.3s</td><td><span class="badge free">200</span></td></tr>
+        <tr><td class="mono">16:08:41</td><td>ZCode · Qwen</td><td>qwen3.8-max</td><td class="num">—</td><td class="num">—</td><td class="num">—</td><td class="num">—</td><td class="num tps na">—</td><td class="num">1.2s</td><td><span class="badge err">401</span></td></tr>
+        <tr><td class="mono">16:02:17</td><td>WB-Global</td><td>deepseek-v4.1-flash</td><td class="num">14,220</td><td class="num">3,891</td><td class="num">12,288</td><td class="num">377ms</td><td class="num tps">61.4</td><td class="num">63.4s</td><td><span class="badge free">200</span></td></tr>
+        <tr><td class="mono">15:58:03</td><td>ZCode · DeepSeek</td><td>deepseek-v4-pro</td><td class="num">6,712</td><td class="num">1,055</td><td class="num">0</td><td class="num">890ms</td><td class="num tps">29.8</td><td class="num">35.4s</td><td><span class="badge free">200</span></td></tr>
+        <tr><td class="mono">15:52:44</td><td>WB-Global</td><td>deepseek-v4.1-flash</td><td class="num">4,301</td><td class="num">712</td><td class="num">3,072</td><td class="num">396ms</td><td class="num tps">50.2</td><td class="num">14.2s</td><td><span class="badge free">200</span></td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="note">
+    <strong>tok/s</strong> = output tokens ÷ 解码时长（首 token 到达 → 流结束），不含 TTFT。
+    <strong>TTFT</strong> 从请求到达 shim 算起，含建连。
+    拿不到上游 usage 的行会标 <span class="badge">est</span> 并在 tok/s 列置灰。
+  </div>
+</div>
+</div>
+
+<!-- ========== ③ 输入框胶囊 ========== -->
+<div class="view" id="v3">
+<div class="composer-demo">
+  <div class="composer-input">问点什么…</div>
+  <div class="dock">
+    <span class="pill">
+      <span class="live"></span>
+      <strong>WB-Global</strong> · deepseek-v4.1-flash
+    </span>
+    <span class="pill">
+      <strong>52.1</strong> tok/s · <strong>1,284</strong> out
+    </span>
+    <span class="spacer"></span>
+    <span class="pill" style="background:transparent;color:var(--label-tertiary)">⌘↵ 发送</span>
+  </div>
+</div>
+
+<div style="max-width:720px;margin-top:16px">
+  <div class="card">
+    <div class="card-head"><div><div class="card-title">三种状态</div><div class="card-desc">胶囊在流式期间实时更新，回合结束冻结</div></div></div>
+    <div class="row">
+      <div class="row-main"><div class="row-name">流式中</div><div class="row-meta">绿点脉冲 · 秒数每秒推进 · tok/s 实时刷新</div></div>
+      <span class="pill"><span class="live"></span><strong>52.1</strong> tok/s · <strong>1,284</strong> out</span>
+    </div>
+    <div class="row">
+      <div class="row-main"><div class="row-name">回合结束</div><div class="row-meta">绿点消失 · 数值冻结 · 保留最后一次读数</div></div>
+      <span class="pill"><strong>48.7</strong> tok/s · <strong>932</strong> out</span>
+    </div>
+    <div class="row">
+      <div class="row-main"><div class="row-name">非流式 / 无数据</div><div class="row-meta">不显示胶囊（不是显示 0）</div></div>
+      <span class="pill" style="opacity:.35"><strong>—</strong> tok/s</span>
+    </div>
+  </div>
+</div>
+
+<div class="note" style="max-width:720px;padding-left:0;margin-top:12px">
+  挂在 <code style="font-family:ui-monospace,Consolas,monospace;font-size:11px">conversation.composer.dock</code>，<code style="font-family:ui-monospace,Consolas,monospace;font-size:11px">scope: 'session'</code>，只描述本会话的回合——宿主级数据不按 session 过滤就会在 A 会话里显示 B 会话的读数。
+</div>
+</div>
+
+<script>
+document.querySelectorAll('.switcher button').forEach(b=>{
+  b.onclick=()=>{
+    document.querySelectorAll('.switcher button').forEach(x=>x.classList.remove('on'));
+    document.querySelectorAll('.view').forEach(x=>x.classList.remove('on'));
+    b.classList.add('on');
+    document.getElementById(b.dataset.v).classList.add('on');
+  };
+});
+document.querySelectorAll('.tabs button').forEach(b=>{
+  b.onclick=()=>{
+    const card=b.closest('.card');
+    card.querySelectorAll('.tabs button').forEach(x=>x.classList.remove('on'));
+    card.querySelectorAll('.panel').forEach(x=>x.classList.remove('on'));
+    b.classList.add('on');
+    document.getElementById(b.dataset.p).classList.add('on');
+  };
+});
+document.querySelectorAll('.sw').forEach(s=>s.onclick=()=>s.classList.toggle('on'));
+</script>
+</body>
+</html>

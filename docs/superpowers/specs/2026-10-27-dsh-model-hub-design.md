@@ -57,6 +57,30 @@ DSH 侧只校验 provider 名非空（`prepareRoutes` 里 `provider.length === 0
 
 SQLite（`node:sqlite`，Node 24 内置，已实测本机可用，无需原生编译）。库文件：`$DSH_HOME/model-hub/hub.db`，WAL 模式。
 
+**三条加固，抄自 `dsh-session-query-sqlite`（DSH 官方的 SQLite 后端，本机在用）**：
+
+1. **`application_id` 认领** —— 建库时写 `PRAGMA application_id = 0x48554231`（"HUB1"），打开时校验；不等于 0 且不等于本值就拒绝打开。防止用户误把别的库放到这个路径，或插件被指向错误文件时写坏别人的数据。
+2. **`user_version` 迁移** —— schema 版本号写在 `PRAGMA user_version`，升级时按版本号逐级 migrate，不靠「表存在就跳过」。
+3. **建库即 0600 / 建目录即 0700** —— 创建时就是，不是建完再 chmod：
+
+```js
+await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+await (await open(path, "wx", 0o600)).close();   // EEXIST 时忽略
+```
+
+打开流程与官方一致：
+
+```js
+const { DatabaseSync } = await import("node:sqlite");
+const db = new DatabaseSync(path);
+const { application_id } = db.prepare("PRAGMA application_id").get();
+const { user_version } = db.prepare("PRAGMA user_version").get();
+if (application_id !== 0 && application_id !== HUB_APP_ID) throw new Error("hub.db belongs to another application");
+db.exec(`PRAGMA journal_mode = WAL`);
+migrate(db, user_version);   // 0 → 1 → 2 …
+db.exec(`PRAGMA application_id = ${HUB_APP_ID}`);
+```
+
 ### 4.1 channels
 
 ```sql
@@ -229,18 +253,46 @@ ZCode **不是登录态复用，是配置导入**。它不起任何监听端口�
 
 ## 8. UI
 
-### 8.1 设置卡片（四栏）
+槽位名全部来自宿主实际注册调用（`slots.inject(...)` / `slots.register({name})`），不是推测。
+
+### 8.1 设置入口：左下角 `sidebar.footer.action`
+
+官方契约原文：*"Optional actions beside Settings at the sidebar foot."*（`dsh-client-ui-sidebar` 的 `sidebar` 条目声明）。`dsh-client-ui-cordis` 的 `cordis-panel` 就占这个位置，证明可用。
+
+```js
+ctx.slots.inject("sidebar.footer.action", () => ctx.slots.register({
+  name: "sidebar.footer.action",
+  id: "dsh-model-hub",
+  order: 100,
+  label: () => t("panel"),
+}, HubSettingsIcon));
+```
+
+宽栏显示图标+文字，窄栏（56px rail）只显示图标（宿主传 `wide` 标志）。
+
+### 8.2 设置卡片：`plugins.row.config` + `plugins.bundle.config`
+
+两处都注册。`dsh-connect-workbuddy` 的做法是先例：不同入口的挂载点不同，哪个能显示就显示哪个，注册失败要 catch 住不影响 provider。
+
+四栏内容：
 
 - **账号** —— 按渠道分组，每行显示名称、状态点、今日用量；操作：启用/禁用、设为当前、删除
 - **渠道** —— 各渠道开关、baseUrl、模型勾选
-- **记录** —— 最近 20 条，点「查看全部」开侧边栏
+- **记录** —— 今日摘要 + 最近 4 条，底部「查看全部」开弹层
 - **诊断** —— 只读事实表：当前渠道/账号、凭据路径、最近错误原文（不翻译不概括）
 
-### 8.2 侧边栏「请求记录」
+### 8.3 请求记录：弹层（Modal）
 
-明细表（时间 / 渠道 / 模型 / in-out token / TTFT / tok/s / 状态）+ 按天聚合图 + 筛选（渠道、模型、时间范围）+ CSV 导出。
+**不占常驻宽度，不裁剪，全部显示** —— 靠表格自身滚动，不做分页折叠。
 
-### 8.3 输入框下方实时胶囊
+- 打开入口：设置卡片「记录」栏的「查看全部」、输入框胶囊
+- 结构：遮罩 + 居中卡片（`max-width: 960px; max-height: 80vh`）
+- 内容：统计条（请求数 / tokens / 平均 TTFT / 平均速度 / 积分）+ 筛选（渠道、模型、时间范围）+ 完整明细表 + 导出 CSV
+- 关闭：右上角 ×、`Esc`、点遮罩
+
+明细表列：时间 / 渠道 / 模型 / in / out / cache / TTFT / tok/s / 耗时 / 状态。
+
+### 8.4 输入框下方实时胶囊
 
 `WB-Global · 42 tok/s · 1.2k out`，本回合流式期间实时更新，回合结束冻结。挂 `conversation.composer.dock`，`scope: 'session'`。
 
@@ -277,7 +329,7 @@ ZCode **不是登录态复用，是配置导入**。它不起任何监听端口�
 |---|---|---|
 | **P0** | 插件骨架 + SQLite + shim + 记录中间件 + **三个渠道全接**（WorkBuddy 2 个 provider、ZCode 5 个 provider、Qoder 1 个） | `--dump-config` 能看到全部 provider；三个渠道各跑一次真实请求，`requests` 各有一行且 token/速度字段非空 |
 | **P1** | 账号管理 UI + 一键认证（三形态）+ 渠道/模型勾选 | 卡片里能增删改账号、切当前；一键认证能报出各渠道「接管了什么 / 缺什么」 |
-| **P2** | 记录面板 + CSV 导出 + 实时胶囊 + 熔断换号 | 面板数据与 DB 一致；胶囊在流式期间实时更新 |
+| **P2** | 记录弹层 + CSV 导出 + 实时胶囊 + 熔断换号 + 左下角设置入口 | 弹层数据与 DB 一致；胶囊在流式期间实时更新；左下角入口可点开 |
 
 **为什么 P0 就接全三个渠道**：shim 与记录层一旦定型，后加渠道只是填后端解析器；反过来先只做 WorkBuddy、后面再改 shim 的抽象，返工成本更高。且三个渠道的凭据本机都已具备（WorkBuddy 已登录、ZCode 配置齐全、Qoder 有 PAT），可以一次性验证。
 

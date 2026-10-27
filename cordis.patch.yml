@@ -1,0 +1,6 @@
+# dsh-model-hub：把三个平台的模型统一接入 DSH。
+#
+# P0 只注册 host 侧。客户端 UI 在 P1 追加 dsh.client 字段与 lib/client.js。
+- insert:
+    - id: dsh-model-hub
+      name: dsh-model-hub

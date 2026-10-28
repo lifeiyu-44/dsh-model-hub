@@ -26,7 +26,11 @@ import type { HubState } from "../state/hub-state.js";
  * ## 凭据纪律（本模块最重的一条）
  *
  * 报告 detail 与日志里只允许出现**文件路径**与 **PAT 前 6 位**（`pt-abc123…`），
- * 绝不出现完整 token。addQoderPat 验活/登记失败时删掉刚写的文件 —— 不留死 PAT。
+ * 绝不出现完整 token。redact 覆盖全部三个入口的错误路径：oneClickAuth（探测）、
+ * testAccount（detail 会经 markAccountResult 落进 DB last_error）、addQoderPat
+ * （异常原文会 rethrow 给路由层进 API 响应）—— live exchangePat 的文案内嵌上游
+ * 响应体前 200 字符，上游若回显 personal_token 就是泄漏面。
+ * addQoderPat 验活/登记失败时删掉刚写的文件 —— 不留死 PAT。
  */
 
 export interface ProberDeps {
@@ -153,23 +157,36 @@ function pickSlug(db: DatabaseSync, dir: string, pat: string, displayName: strin
 /**
  * WorkBuddy 侧三态报告。
  *
- * 只报告**存在**的 auth 文件（不存在的候选路径不是凭据来源，只是搜索位置，
- * 不进 sources —— 否则 5 个候选里天然缺 4 个，渠道级「ok」永远不可达）；
- * 存在的文件按 parseAuthDocument 三态映射：plain→ok / encrypted→encrypted /
- * missing→missing。vault 条目一律 ok。
+ * 展示与聚合分离：`sources` 给人看（含缺失提示，规格 §7「明确说缺什么」），
+ * `present` 给渠道级聚合用（只统计实际存在的来源 —— 5 个候选天然缺 4 个，
+ * 全计入聚合会让渠道级「ok」永不可达）。
+ *
+ * 哪些缺失进 sources：用户**显式指定**的 WORKBUDDY_AUTH_FILE 缺失必须报
+ * （那正是要被告知的错配）；LOCALAPPDATA/APPDATA 下的固定候选缺失不逐条报，
+ * 但零来源时会合成一条把搜索过的路径全部亮出来，让用户能照着行动。
  */
-function probeWorkbuddySources(): { sources: OneClickSource[]; entries: ReturnType<typeof listVaultEntries> } {
+function probeWorkbuddySources(): { sources: OneClickSource[]; present: OneClickSource[]; entries: ReturnType<typeof listVaultEntries> } {
   const sources: OneClickSource[] = [];
-  for (const path of authCandidates()) {
-    if (!existsSync(path)) continue;
+  const present: OneClickSource[] = [];
+  const candidates = authCandidates();
+  const explicit = process.env["WORKBUDDY_AUTH_FILE"];
+  for (const path of candidates) {
+    if (!existsSync(path)) {
+      if (explicit !== undefined && explicit !== "" && path === explicit) {
+        sources.push({ source: path, status: "missing", detail: `${path}（文件不存在 —— 检查 WORKBUDDY_AUTH_FILE）` });
+      }
+      continue;
+    }
     let kind: AuthKind = "missing";
     try {
       kind = parseAuthDocument(readFileSync(path, "utf8")).kind;
     } catch (error) {
-      sources.push({ source: path, status: "error", detail: `${path}（读取失败：${messageOf(error)}）` });
+      const bad: OneClickSource = { source: path, status: "error", detail: `${path}（读取失败：${messageOf(error)}）` };
+      sources.push(bad);
+      present.push(bad);
       continue;
     }
-    sources.push({
+    const entry: OneClickSource = {
       source: path,
       status: kind === "plain" ? "ok" : kind,
       detail: kind === "plain"
@@ -177,13 +194,24 @@ function probeWorkbuddySources(): { sources: OneClickSource[]; entries: ReturnTy
         : kind === "encrypted"
           ? `${path}（token 是加密信封，装 dsh-connect-workbuddy 解一次即可用）`
           : `${path}（文件里没有可用的 accessToken）`,
-    });
+    };
+    sources.push(entry);
+    present.push(entry);
   }
   const entries = listVaultEntries();
   for (const entry of entries) {
-    sources.push({ source: entry.source, status: "ok", detail: `${entry.source}（vault，${entry.region}）` });
+    const vault: OneClickSource = { source: entry.source, status: "ok", detail: `${entry.source}（vault，${entry.region}）` };
+    sources.push(vault);
+    present.push(vault);
   }
-  return { sources, entries };
+  if (sources.length === 0) {
+    sources.push({
+      source: "workbuddy-auth",
+      status: "missing",
+      detail: `未找到 WorkBuddy 登录文件；已搜索：${candidates.join("、")}`,
+    });
+  }
+  return { sources, present, entries };
 }
 
 /**
@@ -244,7 +272,7 @@ export async function oneClickAuth(deps: ProberDeps, db: DatabaseSync, state: Hu
   const channels: OneClickChannel[] = [];
 
   try {
-    const { sources, entries } = probeWorkbuddySources();
+    const { sources, present, entries } = probeWorkbuddySources();
     let accountsAdded = 0;
     if (entries.length > 0) {
       const live = queryAccounts(db) as { id: string; channel_id: string }[];
@@ -271,7 +299,8 @@ export async function oneClickAuth(deps: ProberDeps, db: DatabaseSync, state: Hu
     }
     // 池非空才 ensure：池空时 hub-state 建了 runtime 也会因拉不到目录而空转
     if (state.poolSize(PROVIDER_GLOBAL) > 0) await state.ensureRuntime(PROVIDER_GLOBAL);
-    channels.push({ id: PROVIDER_GLOBAL, status: channelStatusOf(sources), sources, accountsAdded });
+    // 聚合只看存在的来源（present）；sources 含缺失提示，只进展示（review r1）
+    channels.push({ id: PROVIDER_GLOBAL, status: channelStatusOf(present), sources, accountsAdded });
   } catch (error) {
     channels.push({
       id: PROVIDER_GLOBAL,
@@ -348,7 +377,13 @@ async function testWorkbuddyCredential(deps: ProberDeps, ref: string | null): Pr
   if (parsed.kind !== "plain" || parsed.token === undefined) {
     throw new Error(`凭据不可用（${ref}，状态 ${parsed.kind}）`);
   }
-  const models = await withFetch(deps.fetchImpl, () => fetchCatalog(parsed.region ?? "global", parsed.token as string));
+  let models: Awaited<ReturnType<typeof fetchCatalog>>;
+  try {
+    models = await withFetch(deps.fetchImpl, () => fetchCatalog(parsed.region ?? "global", parsed.token as string));
+  } catch (error) {
+    // token 在手：错误文案万一回显就当场隐去，detail/DB 都不留明文
+    throw new Error(redact(messageOf(error), [parsed.token]));
+  }
   return `目录拉取成功（${ref}，${models.length} 个模型）`;
 }
 
@@ -364,7 +399,13 @@ async function testQoderCredential(deps: ProberDeps, ref: string | null): Promis
     if (value.startsWith("pt-")) pat = value;
   }
   if (pat === undefined) throw new Error(`凭据不可用（${ref}，缺 pt- 开头的 PAT）`);
-  await (deps.exchangePat ?? exchangePatLive)(pat, ref);
+  try {
+    await (deps.exchangePat ?? exchangePatLive)(pat, ref);
+  } catch (error) {
+    // live exchangePat 的文案内嵌上游响应体前 200 字符 —— 上游若回显
+    // personal_token，不 redact 就会把 PAT 全文送进 detail 与 DB last_error。
+    throw new Error(redact(messageOf(error), [pat]));
+  }
   return `PAT 验活通过（${ref}）`;
 }
 
@@ -415,6 +456,7 @@ export async function addQoderPat(
     } catch {
       /* 删不掉也别掩盖原错误 —— 文件残留会在诊断里可见 */
     }
-    throw error;
+    // PAT 在手：异常原文（内嵌上游响应体）rethrow 给路由层前先隐去回显的 token
+    throw new Error(redact(messageOf(error), [value]));
   }
 }

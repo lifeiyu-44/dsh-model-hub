@@ -145,7 +145,7 @@ function channelOf(report: { channels: OneClickChannel[] }, id: string): OneClic
 // ── oneClickAuth ──
 
 describe("oneClickAuth · WorkBuddy", () => {
-  it("裸机：两渠道都在报告里且 status=missing，sources 为空，不建 runtime", async () => {
+  it("裸机：两渠道都在报告里且 status=missing，WB 合成来源列出搜索路径，不建 runtime", async () => {
     newHome();
     const database = await freshDb();
     const { calls, state } = fakeState(database);
@@ -154,7 +154,14 @@ describe("oneClickAuth · WorkBuddy", () => {
 
     expect(typeof report.at).toBe("number");
     expect(report.channels.map((c) => c.id)).toEqual([GLOBAL_CHANNEL, QODER_CHANNEL]);
-    expect(channelOf(report, GLOBAL_CHANNEL)).toMatchObject({ status: "missing", sources: [], accountsAdded: 0 });
+    const wb = channelOf(report, GLOBAL_CHANNEL);
+    expect(wb.status).toBe("missing");
+    expect(wb.accountsAdded).toBe(0);
+    // 规格 §7：失败提示要说缺什么 —— 零来源时合成一条，把搜索过的候选路径亮出来
+    expect(wb.sources).toHaveLength(1);
+    expect(wb.sources[0]).toMatchObject({ status: "missing" });
+    expect(wb.sources[0].detail).toContain("已搜索");
+    expect(wb.sources[0].detail).toContain("CodeBuddyExtension");
     expect(channelOf(report, QODER_CHANNEL)).toMatchObject({ status: "missing", sources: [], accountsAdded: 0 });
     expect(calls).toEqual([]); // 没有账号就不该碰 runtime
   });
@@ -208,6 +215,25 @@ describe("oneClickAuth · WorkBuddy", () => {
     const second = await oneClickAuth({}, database, state);
     expect(channelOf(second, GLOBAL_CHANNEL).accountsAdded).toBe(0); // 已存在：幂等跳过不计数
     expect(queryAccounts(database)).toHaveLength(1);
+  });
+
+  it("显式 WORKBUDDY_AUTH_FILE 指向不存在文件 → sources 报 missing（文件不存在）；聚合只看存在的来源", async () => {
+    newHome();
+    const database = await freshDb();
+    const { state } = fakeState(database);
+    const ghost = join(home, "ghost.info");
+    pinEnv("WORKBUDDY_AUTH_FILE", ghost); // 不创建文件 —— 用户显式指定的路径缺失必须被告知
+    const vaultSource = seedVault("acc-live", "vault-tok-9");
+
+    const report = await oneClickAuth({}, database, state);
+    const wb = channelOf(report, GLOBAL_CHANNEL);
+
+    const missing = wb.sources.find((s) => s.source === ghost);
+    expect(missing, "显式指定的缺失路径要出现在 sources 里").toBeDefined();
+    expect(missing!.status).toBe("missing");
+    expect(missing!.detail).toContain("文件不存在");
+    expect(wb.sources.some((s) => s.source === vaultSource && s.status === "ok")).toBe(true);
+    expect(wb.status).toBe("ok"); // 渠道级聚合只统计存在的来源：vault 可用即 ok，缺失提示只进展示
   });
 });
 
@@ -372,6 +398,30 @@ describe("testAccount · Qoder", () => {
     expect(result.ok).toBe(false);
     expect(result.detail).toContain("ghost");
   });
+
+  it("redact：exchangePat 错误文案嵌入 PAT 全文 → detail 与 DB last_error 都被隐去，状态码提取不受影响", async () => {
+    newHome();
+    const database = await freshDb();
+    const { state } = fakeState(database);
+    const patPath = writePatFile("leak.pat", "pt-leakpat0001");
+    seedAccount(database, `${QODER_CHANNEL}:leakacc`, patPath);
+
+    const result = await testAccount(
+      // 模拟上游回显请求里的 personal_token（review 指出的威胁模型）
+      { exchangePat: async () => { throw new Error("PAT 被拒绝（HTTP 401）：personal_token=pt-leakpat0001 原样返回"); } },
+      database, state, `${QODER_CHANNEL}:leakacc`,
+    );
+
+    expect(result.ok).toBe(false);
+    expect(result.detail).not.toContain("pt-leakpat0001"); // 纪律：PAT 全文绝不进 detail
+    expect(result.detail).toContain("（PAT 已隐去）");
+    expect(result.detail).toContain("HTTP 401");
+    // detail 会经 markAccountResult 落进 DB last_error —— 库里同样必须干净
+    const row = database.prepare("SELECT last_error, consecutive_failures FROM accounts WHERE id = ?")
+      .get(`${QODER_CHANNEL}:leakacc`) as { last_error: string; consecutive_failures: number };
+    expect(row.last_error).not.toContain("pt-leakpat0001");
+    expect(row.consecutive_failures).toBe(1); // redact 不得破坏「HTTP 401 → 凭据类失败」提取
+  });
 });
 
 // ── addQoderPat ──
@@ -442,5 +492,21 @@ describe("addQoderPat", () => {
 
     expect(existsSync(join(home, "model-hub", "qoder-pats", "doomed.pat"))).toBe(false); // 不留死 PAT
     expect(queryAccounts(database)).toHaveLength(0);
+  });
+
+  it("redact：验活异常含 PAT 全文 → rethrow 给路由层前被隐去", async () => {
+    newHome();
+    const database = await freshDb();
+    const { state } = fakeState(database);
+
+    const error = await addQoderPat(
+      { exchangePat: async () => { throw new Error("交换失败：personal_token=pt-doomed00002 原样返回"); } },
+      database, state, "pt-doomed00002", "Doomed2",
+    ).then(() => null, (caught: unknown) => caught as Error);
+
+    expect(error).toBeInstanceOf(Error);
+    expect(error!.message).not.toContain("pt-doomed00002"); // 抛给任务 7 路由层的文案同样过 redact
+    expect(error!.message).toContain("（PAT 已隐去）");
+    expect(existsSync(join(home, "model-hub", "qoder-pats", "doomed2.pat"))).toBe(false);
   });
 });

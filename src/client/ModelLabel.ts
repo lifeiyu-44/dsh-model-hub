@@ -4,24 +4,23 @@ import { DATA_PREFIX } from "./types.js";
 /**
  * 模型标签槽里的**彩色**后缀（`conversation.input.model.label`）。
  *
- * ## 为什么需要它
+ * ## 为什么要占这个槽
  *
- * 宿主把模型名当纯文本渲染，`Name · x0.00 · Free now` 只能是一串灰字。
- * 而参考实现 `dsh-connect-workbuddy` 的彩色 pill 是在这个**插槽里自己画**的：
- * 它拿到 `{ provider, model }`，用上游给的 `badge.color` 画背景色。
+ * 宿主把模型名当纯文本渲染，`· x0.00 · Free now` 只能是灰字。
+ * 彩色标记必须在这个插槽里自己画（参考实现同样如此）。
  *
- * 所以彩色后缀不是「改模型名」能实现的，必须注册插槽自定义渲染。
+ * ## 归属判断：按目录命中，不按 provider 前缀
+ *
+ * 实测（2026-10-28）宿主传进来的 props 里取 `provider.id` 不可靠 ——
+ * 曾经因为它取不到就走兜底，结果模型列表全是纯文本、一个彩色标记都没有
+ * （DOM 里能看到槽挂上了，内容却只是名字）。
+ * 现在改成：**拿 `model.id` 去查我们自己的目录**，命中即归我们。
+ * 目录里只有本插件的模型，这个判断既准确又不依赖宿主传参的形状。
  *
  * ## 数据从哪来
  *
- * 客户端拿不到宿主 catalog，只有 `model.id`。host 侧开了
- * `/plugins/dsh-model-hub/catalog` 把 `id -> 倍率/标记/颜色` 发过来，
- * 这里取一次并缓存（目录变化不频繁，5 分钟刷新一次足够）。
- *
- * ## 只接管自己的 provider
- *
- * 不是本插件的模型（provider.id 不是 `hub-` 开头）原样返回宿主给的名字 ——
- * 否则会把别的插件的模型名也改掉。
+ * 客户端不知道倍率与颜色，由 host 的 `/plugins/dsh-model-hub/catalog`
+ * 下发 `id -> 倍率/标记/颜色`。5 分钟刷新一次，全模块共享一份缓存。
  */
 
 interface CatalogEntry {
@@ -36,14 +35,12 @@ interface CatalogEntry {
 
 const REFRESH_MS = 5 * 60_000;
 
-/** 全模块共享一份缓存，避免每个标签实例各拉一次。 */
 let cache: Map<string, CatalogEntry> | undefined;
 let fetchedAt = 0;
 let inflight: Promise<void> | undefined;
 
 async function ensureCatalog(): Promise<void> {
-  const fresh = Date.now() - fetchedAt < REFRESH_MS;
-  if (cache !== undefined && fresh) return;
+  if (cache !== undefined && Date.now() - fetchedAt < REFRESH_MS) return;
   if (inflight !== undefined) return inflight;
 
   inflight = (async () => {
@@ -56,7 +53,7 @@ async function ensureCatalog(): Promise<void> {
       cache = next;
       fetchedAt = Date.now();
     } catch {
-      // 拿不到就退化成「只显示名字」—— 标签不该因为一次网络失败而消失
+      // 拿不到就退化成纯名字 —— 标签不该因为一次网络失败而消失
     } finally {
       inflight = undefined;
     }
@@ -64,29 +61,46 @@ async function ensureCatalog(): Promise<void> {
   return inflight;
 }
 
-/** 让 `#RRGGBB` 变成带透明度的背景色，pill 里更耐看。 */
+/** `#RRGGBB` → 14% 透明度的同色（pill 底色）。 */
 function tint(color: string | undefined): string | undefined {
   if (color === undefined) return undefined;
-  if (/^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/.test(color)) {
-    const hex = color.length === 4 ? `#${color[1]}${color[1]}${color[2]}${color[2]}${color[3]}${color[3]}` : color;
-    const r = Number.parseInt(hex.slice(1, 3), 16);
-    const g = Number.parseInt(hex.slice(3, 5), 16);
-    const b = Number.parseInt(hex.slice(5, 7), 16);
-    return `rgba(${r}, ${g}, ${b}, 0.14)`;
-  }
-  return undefined;
+  const hex = /^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/.test(color)
+    ? color.length === 4
+      ? `#${color[1]}${color[1]}${color[2]}${color[2]}${color[3]}${color[3]}`
+      : color
+    : undefined;
+  if (hex === undefined) return undefined;
+  const r = Number.parseInt(hex.slice(1, 3), 16);
+  const g = Number.parseInt(hex.slice(3, 5), 16);
+  const b = Number.parseInt(hex.slice(5, 7), 16);
+  return `rgba(${r}, ${g}, ${b}, 0.14)`;
 }
 
-export function ModelLabel(props: { provider?: { id?: string }; model?: { id?: string; name?: string } }): React.ReactElement {
-  const providerId = props.provider?.id ?? "";
-  const modelId = props.model?.id ?? "";
-  const fallback = props.model?.name ?? modelId;
+/**
+ * 倍率的语义色 —— 「重要信息」里最该有颜色的一档：
+ * 免费 = 绿，偏贵（≥2） = 琥珀，其余中性灰。
+ */
+function rateColor(rate: number): string {
+  if (rate === 0) return "var(--dmh-success, #22c55e)";
+  if (rate >= 2) return "var(--dmh-warn, #f59e0b)";
+  return "var(--dmh-label-tertiary, #9ca3af)";
+}
+
+export function ModelLabel(props: Record<string, any>): React.ReactElement {
+  // 宿主的传参形状实测有几种，全部兼容
+  const modelId: string = props?.model?.id ?? props?.modelId ?? props?.model?.modelId ?? "";
+  const fallbackName: string = props?.model?.name ?? modelId;
 
   const [entry, setEntry] = React.useState<CatalogEntry | undefined>(() => cache?.get(modelId));
 
   React.useEffect(() => {
-    // 不是本插件的模型：不接管，直接显示宿主给的名字
-    if (!providerId.startsWith("hub-")) return;
+    if (modelId === "") return;
+    // 已经缓存过就同步取，避免闪一下纯文本
+    const hit = cache?.get(modelId);
+    if (hit !== undefined) {
+      setEntry(hit);
+      return;
+    }
     let live = true;
     void ensureCatalog().then(() => {
       if (live) setEntry(cache?.get(modelId));
@@ -94,28 +108,37 @@ export function ModelLabel(props: { provider?: { id?: string }; model?: { id?: s
     return () => {
       live = false;
     };
-  }, [providerId, modelId]);
+  }, [modelId]);
 
-  // 不是 hub 的模型，或目录里没有这个 id —— 原样返回
-  if (!providerId.startsWith("hub-") || entry === undefined) {
-    return React.createElement("span", null, fallback);
+  // 目录里没有 → 不是本插件的模型，原样显示宿主给的名字
+  if (entry === undefined) {
+    return React.createElement("span", null, fallbackName);
   }
 
   const rate = entry.creditMultiplier;
   const badge = entry.promotionBadge ?? entry.tierBadge;
-  const badgeColor = entry.promotionColor ?? entry.tierColor;
-  const background = tint(badgeColor);
+  // 上游给了颜色就用它；没给的话，活动标记按绿、等级标记按青
+  const badgeColor =
+    entry.promotionColor ?? entry.tierColor ?? (entry.promotionBadge === undefined ? "#009273" : "#22c55e");
+  const background = tint(badgeColor) ?? "rgba(127,127,127,0.15)";
 
   return React.createElement(
     "span",
-    { style: { display: "inline-flex", alignItems: "center", gap: 6 } },
+    { style: { display: "inline-flex", alignItems: "center", gap: 5 } },
     React.createElement("span", null, entry.name),
     rate === undefined
       ? null
       : React.createElement(
           "span",
-          { style: { fontSize: "0.92em", opacity: 0.7, fontVariantNumeric: "tabular-nums" } },
-          `· x${rate.toFixed(2)}`,
+          {
+            style: {
+              fontSize: "0.92em",
+              fontWeight: 600,
+              color: rateColor(rate),
+              fontVariantNumeric: "tabular-nums",
+            },
+          },
+          `x${rate.toFixed(2)}`,
         ),
     badge === undefined
       ? null
@@ -129,10 +152,9 @@ export function ModelLabel(props: { provider?: { id?: string }; model?: { id?: s
               borderRadius: 999,
               fontWeight: 600,
               whiteSpace: "nowrap",
-              // 有颜色就用上游的色（淡底 + 原色字），没有就退回中性灰
-              ...(badgeColor === undefined
-                ? { background: "rgba(127,127,127,0.15)", color: "inherit" }
-                : { background, color: badgeColor, border: `1px solid ${badgeColor}` }),
+              background,
+              color: badgeColor,
+              border: `1px solid ${badgeColor}`,
             },
           },
           badge,

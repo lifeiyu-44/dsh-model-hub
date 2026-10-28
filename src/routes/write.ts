@@ -243,16 +243,22 @@ async function addAccounts(
   const channelId = typeof body.channelId === "string" ? body.channelId : "";
 
   if (channelId === PROVIDER_GLOBAL) {
-    // 与 oneClickAuth 的 WB 分支同构：已存在（live）id 跳过不计入 added；
-    // 渠道一个 live 账号都没有时，首个新账号顶 current（池序本就兜底）
+    // 与 oneClickAuth 的 WB 分支同构：渠道一个 live 账号都没有时，首个新账号
+    // 顶 current（池序本就兜底）
     const entries = listVaultEntries();
     const live = queryAccounts(deps.db) as { id: string; channel_id: string }[];
-    const liveIds = new Set(live.map((row) => row.id));
     const channelHasLive = live.some((row) => row.channel_id === PROVIDER_GLOBAL);
+    // 去重必须对**全集 id（含软删）**：upsertOneAccount 的软删守卫（seed.ts）会
+    // 拦下重导入，若只对 live 去重，added 会报出从未真正入库的 id —— 用户删号
+    // 后再点「扫描导入」会看到假成功、账号永不出现。与 prober.pickSlug 的
+    // allAccountIds 同一教训（约束 5：软删不复活，也不许谎报）。
+    const taken = new Set(
+      (deps.db.prepare("SELECT id FROM accounts").all() as { id: string }[]).map((row) => row.id),
+    );
     const fresh: AccountSeed[] = [];
     for (const entry of entries) {
       const id = `${PROVIDER_GLOBAL}:${entry.accountId}`;
-      if (liveIds.has(id)) continue;
+      if (taken.has(id)) continue;
       fresh.push({
         id,
         channelId: PROVIDER_GLOBAL,
@@ -394,7 +400,11 @@ export function registerWriteRoutes(
     try {
       const dispose = inner.webServer.register({
         kind: "prefix",
-        path: `${DATA_PREFIX}/`,
+        // 宿主契约「Absolute pathname, no trailing slash」（dsh-host-webserver
+        // types/index.d.ts:36）：match 的判定是 pathname === prefix ||
+        // startsWith(prefix + "/")，带尾斜杠的 prefix 要双斜杠才命中 —— 九条
+        // 写操作会全部静默漏给 SPA fallback。由装配用例用真实 WebServer 类钉住。
+        path: DATA_PREFIX,
         handler: (req: any, res: any) => {
           void handleWrite(req, res, deps, inner.logger);
         },

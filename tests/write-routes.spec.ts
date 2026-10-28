@@ -1,21 +1,24 @@
 import { afterEach, describe, expect, it } from "vitest";
+import { EventEmitter } from "node:events";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
+import { Context } from "@deepseek-ai/cordis";
+import { WebServer } from "@deepseek-ai/dsh-host-webserver";
 import { openHubDatabase } from "../src/store/db.js";
+import { DATA_PREFIX } from "../src/routes/data.js";
 import { insertRequest, type RequestRecord } from "../src/store/requests.js";
 import { seedChannelsAndAccounts } from "../src/store/seed.js";
 import { createHubState } from "../src/state/hub-state.js";
 import type { QoderSession } from "../src/channels/qoder/credentials.js";
-import { dispatchWrite, writeGate, type WriteDeps } from "../src/routes/write.js";
+import { dispatchWrite, registerWriteRoutes, writeGate, type WriteDeps } from "../src/routes/write.js";
 
 /**
- * 写路由（任务 7）：writeGate 门禁矩阵 + dispatchWrite 分发器，纯函数层直测。
- *
- * 注册路由本身依赖宿主 webServer（ctx.inject(["webServer"])），不在 vitest 面内
- * ——「怎样合法拿到 webServer」由 tests/webserver-access.spec.ts 用真实 Cordis
- * 定死，registerWriteRoutes 的真实装配在任务 9 接线时验证。
+ * 写路由（任务 7）：writeGate 门禁矩阵 + dispatchWrite 分发器，纯函数层直测；
+ * registerWriteRoutes 的装配用**真实宿主 WebServer 类**（register/match 不依赖
+ * init，直接实例化即得宿主真实路由判定）+ fake req/res 打 handler 全链——
+ * 门禁 → 64KB body 上限 → JSON 解析 → 分发，不再把装配验证推给任务 9。
  *
  * state 一律用与 hub-state.spec.ts 同款 fake runtimeFactory 造**真** hub-state：
  * 分发器对 state 的调用契约（toggle→setEnabled、delete→池空 teardown）在工厂
@@ -151,6 +154,86 @@ function seedVault(accountId: string, token: string): string {
   const source = join(dir, `${accountId}.json`);
   writeFileSync(source, JSON.stringify({ auth: { accessToken: token, expiresAt: 999_999_999_999 } }));
   return source;
+}
+
+// ── 装配夹具：真实宿主 WebServer 类 + fake req/res ──
+
+/**
+ * 把 registerWriteRoutes 挂到**真实** WebServer 实例上（不 init——register/match
+ * 只是查表，构造即可用），返回注册捕获与 POST 直达通道。
+ * postThrough 完整复刻宿主请求路径：match(pathname) 命中才进 handler，未命中
+ * 如实返回 matched:false（这正是装配断言的 RED 来源）。
+ */
+async function mountedServer(): Promise<{
+  ws: WebServer;
+  captured: { kind: string; path: string }[];
+  cleanup(): void;
+}> {
+  const r = await rig();
+  const ws = new WebServer(new Context(), { host: "127.0.0.1", port: 0 });
+  const captured: { kind: string; path: string }[] = [];
+  const ctx = {
+    inject: (_deps: string[], cb: (inner: any) => void) =>
+      cb({
+        webServer: {
+          register: (entry: { kind: string; path: string; handler: unknown }) => {
+            captured.push({ kind: entry.kind, path: entry.path });
+            return ws.register(entry as never);
+          },
+        },
+        effect: () => {},
+        logger: {},
+      }),
+  };
+  registerWriteRoutes(ctx as never, r.deps());
+  return { ws, captured, cleanup: r.cleanup };
+}
+
+/** 门禁放行的干净请求头（与 writeGate 用例同款）。 */
+const GATE_CLEAN = { host: "127.0.0.1:1", origin: "http://127.0.0.1:1", "content-type": "application/json" };
+
+interface HandlerOutcome {
+  matched: boolean;
+  statusCode: number;
+  body: string;
+  endCalls: number;
+  destroyed: boolean;
+}
+
+/**
+ * 经真实 WebServer.match 把一次 POST 打进注册的 handler（fake res 收集响应；
+ * fake req 是 EventEmitter，feed 里手动喂数据/收尾——与 collectBody 的监听契约一致）。
+ */
+function postThrough(
+  ws: WebServer,
+  pathname: string,
+  feed: (req: EventEmitter & { headers: Record<string, string>; destroy(): void }) => void,
+  headers: Record<string, string> = GATE_CLEAN,
+): Promise<HandlerOutcome> {
+  return new Promise((resolve) => {
+    const route = ws.match(pathname) as { handler: (req: unknown, res: unknown) => void } | undefined;
+    if (route === undefined) {
+      resolve({ matched: false, statusCode: 0, body: "", endCalls: 0, destroyed: false });
+      return;
+    }
+    const state: HandlerOutcome = { matched: true, statusCode: 0, body: "", endCalls: 0, destroyed: false };
+    const req = new EventEmitter() as EventEmitter & { url: string; headers: Record<string, string>; method: string; destroy(): void };
+    req.url = pathname;
+    req.headers = headers;
+    req.method = "POST";
+    req.destroy = () => { state.destroyed = true; };
+    const res = {
+      writeHead: (status: number, _headers?: unknown) => { state.statusCode = status; return res; },
+      end: (chunk?: string) => {
+        state.endCalls += 1;
+        if (typeof chunk === "string") state.body += chunk;
+        resolve(state);
+        return res;
+      },
+    };
+    route.handler(req, res);
+    feed(req);
+  });
 }
 
 // ── writeGate：门禁矩阵 ──
@@ -431,6 +514,25 @@ describe("dispatchWrite · 分发边界与账号增删", () => {
     }
   });
 
+  it("分发：accounts/add WorkBuddy——软删账号不复活也不假成功（added 不含已删 id）", async () => {
+    newHome();
+    const r = await rig();
+    try {
+      seedVault("acc-main", "vault-tok-1");
+      await dispatchWrite(r.deps(), "/accounts/add", { channelId: GLOBAL_CHANNEL });
+      await dispatchWrite(r.deps(), `/account/${GLOBAL_CHANNEL}:acc-main/delete`, {});
+      const deletedFlag = () =>
+        (r.db.prepare("SELECT deleted FROM accounts WHERE id = ?").get(`${GLOBAL_CHANNEL}:acc-main`) as { deleted: number }).deleted;
+      expect(deletedFlag()).toBe(1); // 真·软删
+
+      const again = await dispatchWrite(r.deps(), "/accounts/add", { channelId: GLOBAL_CHANNEL });
+      expect(again).toEqual({ status: 200, json: { ok: true, added: [] } }); // 守卫拦下 ≠ 添加成功
+      expect(deletedFlag()).toBe(1); // 约束 5：软删行不得被 seed/导入复活
+    } finally {
+      r.cleanup();
+    }
+  });
+
   it("分发：accounts/add Qoder——贴 PAT 入库；格式不对 → 400 且不落盘不入库", async () => {
     newHome();
     const r = await rig();
@@ -500,6 +602,87 @@ describe("dispatchWrite · 分发边界与账号增删", () => {
       expect(factoryInputsOf(r.calls)).toHaveLength(0); // 没有账号就不该碰 runtime
     } finally {
       r.cleanup();
+    }
+  });
+});
+
+// ── registerWriteRoutes：装配（真实宿主 WebServer + handler 全链） ──
+
+describe("registerWriteRoutes · 装配", () => {
+  it("装配：注册 prefix 且无尾斜杠；真实宿主 match 下九条写路径全部可达", async () => {
+    const { ws, captured, cleanup } = await mountedServer();
+    try {
+      expect(captured).toHaveLength(1);
+      // 宿主契约「Absolute pathname, no trailing slash」（types/index.d.ts:36）：
+      // 尾斜杠 prefix 在 match（pathname !== prefix && !startsWith(prefix + "/")）
+      // 下要求双斜杠才能命中 —— 九条写操作全部静默 404（漏给 SPA fallback）
+      expect(captured[0]).toEqual({ kind: "prefix", path: DATA_PREFIX });
+
+      const id = encodeURIComponent(`${QODER_CHANNEL}:a1`);
+      const nine = [
+        `/channel/${GLOBAL_CHANNEL}/toggle`,
+        `/account/${id}/toggle`,
+        `/account/${id}/test`,
+        `/account/${id}/make-current`,
+        `/account/${id}/delete`,
+        "/accounts/add",
+        "/auth/one-click",
+        "/records/prune",
+        "/records/clear",
+      ];
+      for (const rest of nine) {
+        expect(ws.match(`${DATA_PREFIX}${rest}`)?.path, rest).toBe(DATA_PREFIX);
+      }
+      // 只读 exact 路由仍精确命中（match 先查 exact 表，data.ts 不受 prefix 抢占）
+      ws.register({ kind: "exact", path: `${DATA_PREFIX}/summary`, handler: () => {} });
+      expect(ws.match(`${DATA_PREFIX}/summary`)?.kind).toBe("exact");
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("装配：handler 全链——门禁放行、空 body 按 {}、分发 200（records/clear）", async () => {
+    const { ws, cleanup } = await mountedServer();
+    try {
+      const out = await postThrough(ws, `${DATA_PREFIX}/records/clear`, (req) => req.emit("end"));
+      expect(out.matched).toBe(true);
+      expect(out.statusCode).toBe(200);
+      expect(JSON.parse(out.body)).toEqual({ ok: true });
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("装配：body 超 64KB → 413 并 destroy，超限后的字节不二次解析（约束 7）", async () => {
+    const { ws, cleanup } = await mountedServer();
+    try {
+      const out = await postThrough(ws, `${DATA_PREFIX}/records/clear`, (req) => {
+        req.emit("data", Buffer.alloc(64 * 1024 + 1, 0x61)); // 立即超限 → 413 + destroy
+        req.emit("data", Buffer.from("{}")); // destroy 后仍会派发的排队事件：done 旗标必须挡住
+        req.emit("end"); // 不得二次写响应
+      });
+      expect(out.matched).toBe(true);
+      expect(out.statusCode).toBe(413);
+      expect(JSON.parse(out.body)).toEqual({ ok: false, error: "payload_too_large" });
+      expect(out.destroyed).toBe(true);
+      expect(out.endCalls).toBe(1); // 全程只写一次响应
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("装配：坏 JSON → 400 invalid_json", async () => {
+    const { ws, cleanup } = await mountedServer();
+    try {
+      const out = await postThrough(ws, `${DATA_PREFIX}/records/clear`, (req) => {
+        req.emit("data", Buffer.from("{not-json"));
+        req.emit("end");
+      });
+      expect(out.matched).toBe(true);
+      expect(out.statusCode).toBe(400);
+      expect(JSON.parse(out.body)).toEqual({ ok: false, error: "invalid_json" });
+    } finally {
+      cleanup();
     }
   });
 });

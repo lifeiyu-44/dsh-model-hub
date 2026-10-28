@@ -105,8 +105,9 @@ body[data-ds-dark-theme] .dmh-scope, .dmh-scope[data-dmh-dark]{
 
 /* ===== 开关 =====
  * 任务 10 起开关全部可点，类名 dmh-sw 改为 dmh-switch：
- * hover 有反馈、checked 是绿色，不再有 disabled 专属灰 —— 忙时靠全局禁用
- * （opacity 由 .dmh-btn/.dmh-switch 通用规则给），平时不存在"永久禁用"态。 */
+ * hover 有反馈、checked 是绿色；不存在"永久禁用"态，:disabled 只在忙时出现
+ * （与 .dmh-btn:disabled 同样的 opacity 反馈，见 r1 修复：没有它，忙时按钮
+ * 全变暗而开关保持全亮，视觉禁用反馈不一致）。 */
 .dmh-switch{width:30px;height:17px;border-radius:9px;background:var(--dmh-border-l4);position:relative;flex:none;cursor:pointer;border:0;padding:0;transition:background .15s}
 .dmh-switch:hover{background:color-mix(in srgb,var(--dmh-label-quaternary) 70%,var(--dmh-border-l4))}
 .dmh-switch:focus-visible{outline:2px solid var(--dmh-accent-text);outline-offset:1px}
@@ -114,7 +115,7 @@ body[data-ds-dark-theme] .dmh-scope, .dmh-scope[data-dmh-dark]{
 .dmh-switch.dmh-on:hover{background:color-mix(in srgb,var(--dmh-success) 82%,#000)}
 .dmh-switch::after{content:"";position:absolute;top:2px;left:2px;width:13px;height:13px;border-radius:50%;background:#fff;transition:transform .15s;box-shadow:0 1px 2px #0003}
 .dmh-switch.dmh-on::after{transform:translateX(13px)}
-.dmh-switch:disabled{cursor:wait}
+.dmh-switch:disabled{opacity:.45;cursor:wait}
 
 /* ===== 表格 ===== */
 .dmh-table{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums}

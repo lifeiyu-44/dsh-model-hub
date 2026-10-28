@@ -1,4 +1,3 @@
-import { randomUUID } from "node:crypto";
 import { statSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -6,17 +5,20 @@ import { resolveDshHome } from "@deepseek-ai/dsh-home-paths";
 import { Config } from "./config.js";
 import { HUB_DB_NAME, HUB_DIR_NAME, PROVIDER_PREFIX } from "./constants.js";
 import { openHubDatabase } from "./store/db.js";
-import { insertRequest } from "./store/requests.js";
 import { seedChannelsAndAccounts } from "./store/seed.js";
-import { startShim } from "./shim/server.js";
+import { pruneRequests } from "./store/retention.js";
 import { detectCredential } from "./channels/workbuddy/auth.js";
 import { readWorkbuddyVault } from "./channels/workbuddy/vault.js";
-import { fetchCatalog, upstreamBase, conversationIdentityHeaders } from "./channels/workbuddy/catalog.js";
-import { createHubAdapter, createDirectAdapter } from "./provider.js";
-import { registerDataRoutes } from "./routes/data.js";
 import { createSessionManager } from "./channels/qoder/credentials.js";
-import { fetchQoderCatalog } from "./channels/qoder/catalog.js";
-import { createQoderDialect } from "./channels/qoder/chat.js";
+import { createHubState } from "./state/hub-state.js";
+import {
+  startChannelRuntime,
+  type ChannelRuntimeInput,
+  type RegisterReportContext,
+  type RuntimeHandle,
+} from "./state/runtime.js";
+import { registerDataRoutes } from "./routes/data.js";
+import { registerWriteRoutes } from "./routes/write.js";
 
 export const name = "dsh-model-hub";
 export { Config };
@@ -44,53 +46,8 @@ const PROVIDER_GLOBAL = `${PROVIDER_PREFIX}workbuddy-global`;
 /** Qoder CN 渠道的 provider id。 */
 const PROVIDER_QODER = `${PROVIDER_PREFIX}qoder-cn`;
 
-/**
- * 造一个「把请求写进记录表」的回调。
- *
- * 抽出来是因为现在两个渠道共用同一张记录表 —— 逻辑必须完全一致，
- * 只有 channelId 不同；复制一遍迟早漂。
- */
-function makeRecorder(
-  db: Parameters<typeof insertRequest>[0],
-  channelId: string,
-  enabled: () => boolean,
-) {
-  return (input: {
-    metrics: any;
-    statusCode: number;
-    error?: string;
-    isStreaming: boolean;
-    model: string;
-  }): void => {
-    if (!enabled()) return;
-    const { metrics, statusCode, error, isStreaming, model } = input;
-    try {
-      insertRequest(db, {
-        requestId: randomUUID(),
-        channelId,
-        provider: channelId,
-        model,
-        inputTokens: metrics.inputTokens,
-        outputTokens: metrics.outputTokens,
-        cacheRead: metrics.cacheRead,
-        cacheWrite: metrics.cacheWrite,
-        ...(metrics.firstTokenMs === undefined ? {} : { firstTokenMs: metrics.firstTokenMs }),
-        ...(metrics.upstreamHeadMs === undefined ? {} : { upstreamHeadMs: metrics.upstreamHeadMs }),
-        ...(metrics.durationMs === undefined ? {} : { durationMs: metrics.durationMs }),
-        ...(metrics.decodeTps === undefined ? {} : { decodeTps: metrics.decodeTps }),
-        statusCode,
-        ...(error === undefined ? {} : { error }),
-        isStreaming,
-        estimated: metrics.estimated,
-        costUnits: 0,
-        createdAt: Date.now(),
-      });
-    } catch (caught) {
-      /* 观测失败不能影响请求 */
-      void caught;
-    }
-  };
-}
+/** 保留清理周期（24h）；每次触发现读最新的 `settings.retentionDays`。 */
+const RETENTION_INTERVAL_MS = 24 * 3_600_000;
 
 export function apply(ctx: any, config: any): void {
   // 最外层防线：apply() 内的任何同步异常都不得冒到 Cordis 加载期。
@@ -110,6 +67,11 @@ export function apply(ctx: any, config: any): void {
   }
 }
 
+/**
+ * 装配层：本文件只负责「把零件按顺序拧起来」，不再有业务逻辑 ——
+ * 渠道 runtime 在 `state/runtime.ts`，状态机在 `state/hub-state.ts`，
+ * 读写路由在 `routes/`，探测在 `probe/prober.ts`。
+ */
 function applyInner(ctx: any, config: any): void {
   const settings = config ?? {};
   if (settings.enabled === false) return;
@@ -117,6 +79,7 @@ function applyInner(ctx: any, config: any): void {
   const dbPath = join(resolveDshHome(), HUB_DIR_NAME, HUB_DB_NAME);
 
   void (async () => {
+    // ── 1. 开库（失败只关记录，provider 不受影响）──
     let db: Awaited<ReturnType<typeof openHubDatabase>>;
     try {
       db = await openHubDatabase(dbPath);
@@ -125,6 +88,36 @@ function applyInner(ctx: any, config: any): void {
       return;
     }
 
+    // ── 2. HubState 状态中心 ──
+    //
+    // runtimeFactory 闭包补上 ChannelRuntimeInput 没有的两样：宿主 ctx 与
+    // 注册结果回报。registerAdapter 不在这里传 —— 生产实现（原 registerProvider，
+    // 迁往 runtime.ts 的 createRegisterAdapter）要把 shim 地址/密钥绑进 adapter，
+    // 而 shim 在 startChannelRuntime 内部才建好，只能由它做缺省注入。
+    let workbuddyShimUrl: string | undefined; // 诊断栏「shim 地址」键的现状来源
+    const state = createHubState({
+      db,
+      settings: () => settings,
+      logger: ctx.logger,
+      runtimeFactory: async (input: ChannelRuntimeInput): Promise<RuntimeHandle> => {
+        const handle = await startChannelRuntime({
+          ...input,
+          ctx,
+          ...(input.channelId === PROVIDER_GLOBAL
+            ? {
+                // status.json 语义保留：仍只记 WorkBuddy 全局渠道的注册结局
+                // （deploy.ps1 的自检读这份文件，Qoder 的注册不改写它）。
+                onRegisterReport: (outcome: RegisterReportContext) => writeStatus(ctx, outcome),
+              }
+            : {}),
+        });
+        if (input.channelId === PROVIDER_GLOBAL) workbuddyShimUrl = handle.shim.baseUrl();
+        return handle;
+      },
+    });
+
+    // ── 3a. WorkBuddy：凭据发现（文案保留）→ seed → ensureRuntime ──
+    //
     // 凭据来源按顺序试：
     //   1. 桌面端 auth 文件里的**明文** token（旧版桌面端才这样）
     //   2. dsh-connect-workbuddy 已解好的 vault（本机的实际情况 —— 桌面端
@@ -147,89 +140,43 @@ function applyInner(ctx: any, config: any): void {
       ctx.logger?.warn?.(
         `dsh-model-hub: 未找到可用的 WorkBuddy token —— ${why}。请先装 WorkBuddy 桌面端登录一次，或装 dsh-connect-workbuddy 让它解一次。渠道不注册。`,
       );
-      return;
+      // 与旧版「直接 return」的差别：缺凭据只跳过这一个渠道。面板与写路由
+      // 照常起，账号可以稍后经面板「一键认证」补上 —— 那正是账号管理的入口。
+    } else {
+      ctx.logger?.info?.(`dsh-model-hub: 凭据来源 = ${credential.source}（${credential.parsed.region ?? "global"}）`);
     }
 
-    const token = credential.parsed.token as string;
-    const region = credential.parsed.region ?? "global";
-    ctx.logger?.info?.(`dsh-model-hub: 凭据来源 = ${credential.source}（${region}）`);
-
-    // 先把渠道与账号登记上 —— 面板的「渠道」「账号」两栏靠这两张表，
-    // 而它们不随请求写入。少了这一步，没发过请求时面板看起来像坏了。
-    // 写失败不影响 provider（诊断信息而已），所以只记日志。
-    try {
-      seedChannelsAndAccounts(
-        db,
-        [{ id: PROVIDER_GLOBAL, kind: "workbuddy", displayName: "WorkBuddy Global" }],
-        [
-          {
-            id: `${PROVIDER_GLOBAL}:default`,
-            channelId: PROVIDER_GLOBAL,
-            displayName: "WorkBuddy 主账号",
-            credentialRef: credential.source,
-            isCurrent: true,
-          },
-        ],
-      );
-    } catch (error) {
-      ctx.logger?.warn?.("dsh-model-hub: 渠道/账号登记失败（面板可能显示为空，provider 不受影响）", error);
+    if (credential !== undefined) {
+      // 先把渠道与账号登记上 —— 面板的「渠道」「账号」两栏靠这两张表，
+      // 而它们不随请求写入。少了这一步，没发过请求时面板看起来像坏了。
+      // 写失败不影响 provider（诊断信息而已），所以只记日志。
+      try {
+        seedChannelsAndAccounts(
+          db,
+          [{ id: PROVIDER_GLOBAL, kind: "workbuddy", displayName: "WorkBuddy Global" }],
+          [
+            {
+              id: `${PROVIDER_GLOBAL}:default`,
+              channelId: PROVIDER_GLOBAL,
+              displayName: "WorkBuddy 主账号",
+              credentialRef: credential.source, // 凭据只存引用，绝不落明文
+              isCurrent: true,
+            },
+          ],
+        );
+      } catch (error) {
+        ctx.logger?.warn?.("dsh-model-hub: 渠道/账号登记失败（面板可能显示为空，provider 不受影响）", error);
+      }
+      // runtime（shim + 拉目录 + 上架 adapter）由 state 统一建：目录/凭据问题
+      // 在 hub-state 里折成 error 日志并保持「无 runtime」，不会炸这里。
+      await state.ensureRuntime(PROVIDER_GLOBAL);
     }
 
-    const models = await fetchCatalog(region, token).catch((error: unknown) => {
-      ctx.logger?.warn?.("dsh-model-hub: 模型目录拉取失败，使用空目录", error);
-      return [];
-    });
-
-    /**
-     * 面板用的**合并目录**（所有渠道）。
-     *
-     * 每个渠道各自注册自己的 provider，但面板要的是「一共多少个模型」，
-     * 模型标签槽也要按 id 查到任意渠道的倍率与标记。
-     * 之前只把 WorkBuddy 那份给了 `/catalog`，Qoder 的 10 个模型在面板里等于不存在。
-     */
-    const panelCatalog: {
-      id: string;
-      name: string;
-      creditMultiplier?: number;
-      promotionBadge?: string;
-      tierBadge?: string;
-      promotionColor?: string;
-      tierColor?: string;
-    }[] = [...models];
-
-    const shim = await startShim({
-      prepare: async () => ({
-        baseUrl: upstreamBase(region),
-        headers: {
-          Authorization: `Bearer ${token}`,
-          "User-Agent": "WorkBuddy/5.12.1 WorkBuddy/5.12.1 CLI/2.63.2",
-          // 每次请求现生成 —— 渠道校验认这三个头（实测，见 catalog.ts 的注释）。
-          ...conversationIdentityHeaders(),
-        },
-      }),
-      record: makeRecorder(db, PROVIDER_GLOBAL, () => settings.recordEnabled !== false),
-    });
-
-    const release = registerProvider(ctx, shim.baseUrl(), shim.token(), models, async (outcome) => {
-      // 注册是异步的，而且「注册成功」不等于「能出模型」—— 所以结果由
-      // registerProvider 自检完再回报，不是在这里假定。
-      await writeStatus(ctx, {
-        ...outcome,
-        provider: PROVIDER_GLOBAL,
-        shim: shim.baseUrl(),
-        catalogCount: models.length,
-      });
-    });
-
-    // ── Qoder CN 渠道 ──
+    // ── 3b. Qoder CN 渠道（同构；缺 PAT 照旧 warn + 跳过）──
     //
-    // 与 WorkBuddy 同构（也是过一层 shim，所以它的请求同样进记录表），
-    // 差别只在 shim 带了 Qoder 方言：请求体自定义编码 + 双层 SSE 解包。
-    //
-    // 协议层已实测跑通（PAT→jobToken→COSY→目录 10 个模型；对话经 shim 拿到正确回答）。
-    // 没凭据就安静跳过，不影响 WorkBuddy。
-    let qoderShim: Awaited<ReturnType<typeof startShim>> | undefined;
-    let releaseQoder: (() => void) | undefined;
+    // 也是过一层 shim（请求同样进记录表），差别只在 shim 带了 Qoder 方言：
+    // 请求体自定义编码 + 双层 SSE 解包。协议细节在 runtime.ts / channels/qoder。
+    // Qoder 的任何问题都不得拖垮 WorkBuddy。
     try {
       const sessions = createSessionManager();
       const qoderSession = await sessions.current();
@@ -238,74 +185,60 @@ function applyInner(ctx: any, config: any): void {
           "dsh-model-hub: 未找到 Qoder PAT（~/.dsh/qoder/pat 或 QODERCN_PAT），Qoder 渠道不注册",
         );
       } else {
-        const qoderCatalog = await fetchQoderCatalog(qoderSession);
-        if (qoderCatalog.error !== undefined) {
-          ctx.logger?.warn?.(`dsh-model-hub: Qoder 目录拉取失败，渠道不注册 —— ${qoderCatalog.error}`);
-        } else if (qoderCatalog.models.length === 0) {
-          ctx.logger?.warn?.("dsh-model-hub: Qoder 目录为空，渠道不注册");
-        } else {
-          ctx.logger?.info?.(
-            `dsh-model-hub: Qoder 凭据 ${qoderSession.source}，目录 ${qoderCatalog.models.length} 个模型（uid ${qoderSession.userID.slice(0, 8)}…）`,
-          );
-          // 把 Qoder 模型也并进面板目录（模型标签要靠它查倍率上色）
-          for (const model of qoderCatalog.models) {
-            panelCatalog.push({
-              id: model.id,
-              name: model.name,
-              creditMultiplier: model.creditMultiplier,
-            });
-          }
-          seedChannelsAndAccounts(
-            db,
-            [{ id: PROVIDER_QODER, kind: "qoder", displayName: "Qoder CN" }],
-            [
-              {
-                id: `${PROVIDER_QODER}:default`,
-                channelId: PROVIDER_QODER,
-                displayName: "Qoder CN 账号",
-                credentialRef: qoderSession.source,
-                isCurrent: true,
-              },
-            ],
-          );
-
-          qoderShim = await startShim({            // prepare 在方言模式下不会被用到（URL/头/体全由 dialect.request 决定），
-            // 但仍然要实现，因为接口要求。给一个明显的占位地址，误用会立刻炸。
-            prepare: async () => ({ baseUrl: "https://qoder.invalid", headers: {} }),
-            dialect: createQoderDialect({ sessionFor: () => sessions.current() }),
-            record: makeRecorder(db, PROVIDER_QODER, () => settings.recordEnabled !== false),
-          });
-
-          const qoderShimHandle = qoderShim;
-          releaseQoder = registerProvider(
-            ctx,
-            qoderShimHandle.baseUrl(),
-            qoderShimHandle.token(),
-            qoderCatalog.models as never,
-            async (outcome) => {
-              ctx.logger?.info?.(
-                `dsh-model-hub: Qoder provider 注册结果 ok=${outcome.ok} models=${outcome.modelCount}` +
-                  (outcome.error === undefined ? "" : ` error=${outcome.error}`),
-              );
+        ctx.logger?.info?.(`dsh-model-hub: Qoder 凭据 ${qoderSession.source}（uid ${qoderSession.userID.slice(0, 8)}…）`);
+        // 与 WorkBuddy 相同的两步：登记（只存引用）→ ensureRuntime。
+        // 目录拉取失败时 hub-state 保持「无 runtime」，账号留在面板里可测试/重试。
+        seedChannelsAndAccounts(
+          db,
+          [{ id: PROVIDER_QODER, kind: "qoder", displayName: "Qoder CN" }],
+          [
+            {
+              id: `${PROVIDER_QODER}:default`,
+              channelId: PROVIDER_QODER,
+              displayName: "Qoder CN 账号",
+              credentialRef: qoderSession.source,
+              isCurrent: true,
             },
-            PROVIDER_QODER,
-          );
-        }
+          ],
+        );
+        await state.ensureRuntime(PROVIDER_QODER);
       }
     } catch (error) {
-      // Qoder 的任何问题都不得拖垮 WorkBuddy
       ctx.logger?.warn?.("dsh-model-hub: Qoder 渠道初始化失败（WorkBuddy 不受影响）", error);
     }
 
+    // ── 4. 保留清理：启动跑一次 + 每 24h（每次现读最新设置）──
+    try {
+      const removed = pruneRequests(db, settings.retentionDays ?? 90);
+      if (removed > 0) {
+        ctx.logger?.info?.(`dsh-model-hub: 启动清理删除 ${removed} 条过期明细（保留 ${settings.retentionDays ?? 90} 天）`);
+      }
+    } catch (error) {
+      ctx.logger?.warn?.("dsh-model-hub: 启动保留清理失败（不影响插件）", error);
+    }
+    const retentionTimer = setInterval(() => {
+      try {
+        const removed = pruneRequests(db, settings.retentionDays ?? 90);
+        if (removed > 0) {
+          ctx.logger?.info?.(`dsh-model-hub: 定时清理删除 ${removed} 条过期明细（保留 ${settings.retentionDays ?? 90} 天）`);
+        }
+      } catch (error) {
+        // 定时器回调里的异常是 uncaughtException，会炸宿主 —— 必须就地吞掉
+        ctx.logger?.warn?.("dsh-model-hub: 定时保留清理失败（下个周期重试）", error);
+      }
+    }, RETENTION_INTERVAL_MS);
+    retentionTimer.unref(); // 纯周期任务，不该阻止宿主进程退出
+
+    // ── 5. teardown：资源已存在就先挂清理（早于路由注册，注册失败也不泄漏）──
+    //
+    // 清理清单统一由 state.dispose 给出（release adapter → shim.close → db.close，
+    // 逐项吞错）；这里只补保留清理的定时器。
     ctx.effect(() => () => {
-      release();
-      releaseQoder?.();
-      qoderShim?.close();
-      shim.close();
-      db.close();
+      clearInterval(retentionTimer);
+      return state.dispose();
     }, "dsh-model-hub: teardown");
 
-    // 面板数据路由。
+    // ── 6. 面板数据路由 ──
     //
     // 教训：`ctx.webServer` 的属性访问由插件的**静态** `inject` 数组把关 ——
     // 但正确写法不是把它加进静态 inject，而是走 `ctx.inject(["webServer"], cb)`，
@@ -316,23 +249,42 @@ function applyInner(ctx: any, config: any): void {
     // 两种写法的差异由 tests/webserver-access.spec.ts 用真实 Cordis 定死。
     registerDataRoutes(ctx, {
       db,
-      catalog: () => panelCatalog,
+      // /catalog 的合并目录（键与顺序不变）：目录 runtime 化后按渠道挂在
+      // state 上，这里拍平 —— panelCatalog 的手工拼接就此退役。
+      catalog: () => Object.values(state.panelModelsByChannel()).flat(),
+      // /channels 新增 models_by_channel（任务 10 的渠道展开要用）
+      modelsByChannel: () => state.panelModelsByChannel(),
+      // /diag 新增 recordEnabled/retentionDays，与写路由的保留天数同源
+      settings: () => ({ recordEnabled: settings.recordEnabled, retentionDays: settings.retentionDays }),
       // 诊断栏里只有 host 知道的事实。全部来自本次启动的实测值，
       // 不是写死的字符串 —— 面板上写假值比不写更糟。
       diag: () => ({
         pluginVersion: PLUGIN_VERSION,
         dbPath,
         dbSizeBytes: fileSizeOrNull(dbPath),
-        credentialPath: credential.source,
-        tokenExpiresAt: credential.parsed.expiresAtMs ?? null,
-        region: credential.parsed.region ?? null,
-        shimUrl: shim.baseUrl(),
-        modelCount: panelCatalog.length,
+        ...(credential === undefined
+          ? {}
+          : {
+              credentialPath: credential.source,
+              tokenExpiresAt: credential.parsed.expiresAtMs ?? null,
+              region: credential.parsed.region ?? null,
+            }),
+        ...(workbuddyShimUrl === undefined ? {} : { shimUrl: workbuddyShimUrl }),
+        modelCount: Object.values(state.panelModelsByChannel()).reduce((n, entries) => n + entries.length, 0),
       }),
     });
 
+    // ── 7. 写路由（门禁与九个操作在 routes/write.ts）──
+    registerWriteRoutes(ctx, {
+      state,
+      db,
+      proberDeps: {}, // 生产：fetch / exchangePat / dshHome 全用缺省实现
+      retentionDays: () => settings.retentionDays ?? 90,
+    });
+
     ctx.logger?.info?.(
-      `dsh-model-hub: 已注册 ${PROVIDER_GLOBAL}（${models.length} 个模型），shim=${shim.baseUrl()}`,
+      `dsh-model-hub: 装配完成 —— runtime 渠道 [${Object.keys(state.panelModelsByChannel()).join("、") || "无"}]` +
+        (workbuddyShimUrl === undefined ? "" : `，workbuddy shim=${workbuddyShimUrl}`),
     );
   })().catch((caught: unknown) => {
     // 异步体里任何逃逸的异常都不得冒到宿主加载期 —— 那会 fatal。
@@ -373,93 +325,3 @@ async function writeStatus(
     ctx.logger?.warn?.("dsh-model-hub: 状态文件写入失败（不影响插件）", error);
   }
 }
-
-/**
- * 注册 provider。
- *
- * ## 为什么不是「把配置文档形状塞进 profiles()」
- *
- * `PiAiAdapter` 的 `profiles()` 收的**不是** `dsh-llm-pi-ai` 设置文档里的
- * provider 条目（`api` / `baseURL` / `models` 那套），而是那个模块
- * **已经解析完**的内部 profile 形状。它的 `current()` 只做一件事：
- *
- * ```js
- * for (const profile of profiles.values())
- *   if (profile.piProvider !== undefined) models.setProvider(profile.piProvider);
- * ```
- *
- * 也就是说模型全部来自 `profile.piProvider` —— 一个 pi-ai 的 provider 对象。
- * 少了它，`models` 集合是空的：`listModels()` 返回 `[]`，
- * `resolveModel()` 在 `profile.modelErrors.get(...)` 上踩空抛裸 TypeError。
- *
- * **这个坑的可怕之处在于它「看起来成功了」**：`registerAdapter` 不报错、
- * `llm/listProviders` 里能看到 `hub-workbuddy-global`，只有真的去选模型
- * 才会发现一个都没有。P0 就是这样验收漏掉的 —— 只查了 provider 在不在列表里。
- *
- * 形状转换本身在 `provider.ts`（独立可测），这里只负责装配与注册。
- */
-function registerProvider(
-  ctx: any,
-  shimBaseUrl: string,
-  shimToken: string,
-  models: Awaited<ReturnType<typeof fetchCatalog>>,
-  report: (outcome: { ok: boolean; modelCount: number; modelIds?: string[]; error?: string }) => Promise<void>,
-  /** 要注册的 provider id。默认是 WorkBuddy 那条；Qoder 传自己的。 */
-  providerId: string = PROVIDER_GLOBAL,
-): () => void {
-  let released = false;
-  let release: (() => void) | undefined;
-
-  void (async () => {
-    const [{ PiAiAdapter }, { createProvider }, { openAICompletionsApi }, { resolveRetryPolicy }] = await Promise.all([
-      import("@deepseek-ai/dsh-llm-pi-ai"),
-      import("@earendil-works/pi-ai"),
-      import("@earendil-works/pi-ai/api/openai-completions.lazy"),
-      import("@deepseek-ai/dsh-llm"),
-    ]);
-    if (released) return;
-
-    const adapter = createHubAdapter({
-      provider: providerId,
-      shimBaseUrl,
-      shimToken,
-      models,
-      createProvider,
-      openAICompletionsApi,
-      resolveRetryPolicy,
-      PiAiAdapter,
-    });
-
-    if (released) return;
-    release = ctx.llm.registerAdapter([providerId], adapter);
-
-    // 注册之后再自检一次：真的问 adapter 要一遍模型列表。
-    // 「registerAdapter 没报错」不足以证明能用 —— P0 就是这么骗过验收的。
-    try {
-      const listed = await adapter.listModels(providerId);
-      const ids = listed.map((m: { id: string }) => m.id);
-      if (ids.length === 0) {
-        ctx.logger?.warn?.("dsh-model-hub: provider 注册成功但模型列表为空 —— 检查 provider.ts 的 piProvider");
-        await report({ ok: false, modelCount: 0, modelIds: [], error: "listModels returned no models" });
-        return;
-      }
-      ctx.logger?.info?.(`dsh-model-hub: provider 注册完成（${ids.length} 个模型可被选中）`);
-      await report({ ok: true, modelCount: ids.length, modelIds: ids });
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      ctx.logger?.error?.("dsh-model-hub: provider 注册后自检失败", error);
-      await report({ ok: false, modelCount: 0, error: message });
-    }
-  })().catch(async (error: unknown) => {
-    const message = error instanceof Error ? error.message : String(error);
-    ctx.logger?.error?.("dsh-model-hub: provider 注册失败", error);
-    await report({ ok: false, modelCount: 0, error: message }).catch(() => {});
-  });
-
-  return () => {
-    released = true;
-    release?.();
-  };
-}
-
-

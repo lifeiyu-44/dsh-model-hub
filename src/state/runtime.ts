@@ -4,8 +4,9 @@ import type { DatabaseSync } from "node:sqlite";
 import { startShim, type ShimHandle } from "../shim/server.js";
 import type { TurnMetrics } from "../shim/recorder.js";
 import { insertRequest } from "../store/requests.js";
+import { createHubAdapter } from "../provider.js";
 import { parseAuthDocument } from "../channels/workbuddy/auth.js";
-import { conversationIdentityHeaders, fetchCatalog, upstreamBase } from "../channels/workbuddy/catalog.js";
+import { DESKTOP_UA, conversationIdentityHeaders, fetchCatalog, upstreamBase } from "../channels/workbuddy/catalog.js";
 import { createSessionManager, type QoderSession } from "../channels/qoder/credentials.js";
 import { fetchQoderCatalog } from "../channels/qoder/catalog.js";
 import { createQoderDialect } from "../channels/qoder/chat.js";
@@ -19,8 +20,9 @@ import type { SelectorRow } from "./selector.js";
  * 渠道一多（多账号计划后 WorkBuddy / Qoder 都要可启停）就得抽成参数化的
  * 一个函数：hub-state 只管「什么时候要 runtime」，这里管「runtime 长什么样」。
  *
- * 本任务只定义接口与内部逻辑；生产 `registerAdapter`（把 index.ts 的
- * registerProvider 迁来）属任务 9 —— 它是注入依赖，测试传 fake。
+ * 上架 adapter 的实现是注入点（RegisterAdapterFn，测试传 fake）；生产实现
+ * {@link createRegisterAdapter}（原 index.ts 的 registerProvider）也在本模块
+ * —— 它要绑定 shim 地址/密钥，只能在 shim 起好后的内部做缺省注入。
  */
 
 /** 面板目录条目（index.ts panelCatalog 的形状，模型标签槽按 id 查倍率上色）。 */
@@ -80,6 +82,20 @@ export interface RegisterReport {
 }
 
 /**
+ * 注册结果回报（{@link ChannelRuntimeDeps.onRegisterReport} 的入参）：
+ * RegisterReport 加上调用方（index.ts 的 writeStatus/status.json）需要、
+ * 但只有 runtime 内部知道的上下文。
+ */
+export type RegisterReportContext = RegisterReport & {
+  /** 注册的 provider id（= channelId）。 */
+  provider: string;
+  /** 本次上架的 shim 地址（诊断要用；调用方拿不到 runtime 内部的 shim）。 */
+  shim: string;
+  /** 上架时的目录条数 —— 与 modelCount 的自检口径不同：目录 ≠ 真正可选中的模型。 */
+  catalogCount: number;
+};
+
+/**
  * 把模型上架到宿主选择器，返回下架函数。
  *
  * 注册是异步完成的（内部动态 import），返回的 release 必须可同步调用且幂等，
@@ -95,11 +111,19 @@ export type RegisterAdapterFn = (
 export interface ChannelRuntimeDeps extends ChannelRuntimeInput {
   /** 宿主 ctx（生产 registerAdapter 要用它注册 provider；测试 fake 可忽略）。 */
   ctx: unknown;
-  registerAdapter: RegisterAdapterFn;
+  /**
+   * 上架 adapter 的实现。**不传用生产实现**（{@link createRegisterAdapter}）——
+   * 它要把 shim 地址/密钥绑进 adapter，而 shim 在 startChannelRuntime 内部
+   * 才建好，生产路径没法在外面预先构造；测试传 fake 从这里注入。
+   */
+  registerAdapter?: RegisterAdapterFn;
+  /**
+   * 每次上架后的结果回报（生产接 index.ts 的 writeStatus 写 status.json；
+   * 测试可不传）。register → setEnabled(true) → refresh 的每次重注册都会触发，
+   * status.json 始终反映最近一次注册的真实结果。
+   */
+  onRegisterReport?: (outcome: RegisterReportContext) => Promise<void>;
 }
-
-/** 桌面端 UA —— 上游按客户端通道裁剪配置（与 catalog.ts 的取值一致）。 */
-const DESKTOP_UA = "WorkBuddy/5.12.1 WorkBuddy/5.12.1 CLI/2.63.2";
 
 /**
  * 账号的 credential_ref（指向 vault/auth/PAT 文件的路径引用）。
@@ -115,10 +139,17 @@ function credentialRefOf(db: DatabaseSync, accountId: string): string | null {
   return row?.credential_ref ?? null;
 }
 
-/** 现读 PAT 文件；不是 `pt-` 开头或读不了都算没有（fail-soft）。 */
+/** 现读 PAT；不是 `pt-` 开头或读不了都算没有（fail-soft）。 */
 function patOf(db: DatabaseSync, accountId: string): { pat: string; source: string } | undefined {
   const ref = credentialRefOf(db, accountId);
   if (ref === null) return undefined;
+  // `env:` 前缀 = 环境变量来源（启动 seed 会把 session.source 原样登记进库）。
+  // 解读与 prober.testQoderCredential 一致 —— 不处理它，env 来源的账号在
+  // runtime 里永远「凭据不可用」，而单账号时期它们是能服务的（装配化的回归）。
+  if (ref.startsWith("env:")) {
+    const value = process.env[ref.slice("env:".length)]?.trim();
+    return value !== undefined && value.startsWith("pt-") ? { pat: value, source: ref } : undefined;
+  }
   try {
     const pat = readFileSync(ref, "utf8").trim();
     return pat.startsWith("pt-") ? { pat, source: ref } : undefined;
@@ -137,6 +168,99 @@ function toPanelEntries(models: ChannelModel[]): PanelEntry[] {
     ...(m.promotionColor === undefined ? {} : { promotionColor: m.promotionColor }),
     ...(m.tierColor === undefined ? {} : { tierColor: m.tierColor }),
   }));
+}
+
+/**
+ * 生产 registerAdapter：把模型上架到宿主 llm 选择器（原 index.ts 的
+ * registerProvider 原样迁来，任务 9 裁定 3）。
+ *
+ * RegisterAdapterFn 接口不带 shim 地址/密钥（测试 fake 不该关心它们），
+ * 而这两样只有持有 ShimHandle 的一方知道 —— 所以生产实现是「绑定 shim 的
+ * 工厂」，startChannelRuntime 在 shim 起好后作为缺省注入使用。
+ *
+ * ## 为什么不是「把配置文档形状塞进 profiles()」
+ *
+ * `PiAiAdapter` 的 `profiles()` 收的**不是** `dsh-llm-pi-ai` 设置文档里的
+ * provider 条目（`api` / `baseURL` / `models` 那套），而是那个模块
+ * **已经解析完**的内部 profile 形状。它的 `current()` 只做一件事：
+ *
+ * ```js
+ * for (const profile of profiles.values())
+ *   if (profile.piProvider !== undefined) models.setProvider(profile.piProvider);
+ * ```
+ *
+ * 也就是说模型全部来自 `profile.piProvider` —— 一个 pi-ai 的 provider 对象。
+ * 少了它，`models` 集合是空的：`listModels()` 返回 `[]`，
+ * `resolveModel()` 在 `profile.modelErrors.get(...)` 上踩空抛裸 TypeError。
+ *
+ * **这个坑的可怕之处在于它「看起来成功了」**：`registerAdapter` 不报错、
+ * `llm/listProviders` 里能看到 `hub-workbuddy-global`，只有真的去选模型
+ * 才会发现一个都没有。P0 就是这样验收漏掉的 —— 只查了 provider 在不在列表里。
+ *
+ * 形状转换本身在 `provider.ts`（独立可测），这里只负责装配与注册。
+ */
+export function createRegisterAdapter(shim: ShimHandle): RegisterAdapterFn {
+  return (ctx, providerId, models, report) => {
+    // RegisterAdapterFn 为测试把 ctx 定成 unknown；生产它就是宿主 ctx
+    // （插件静态 inject 了 llm，所以 llm 必在）。
+    const host = ctx as {
+      llm: { registerAdapter(ids: string[], adapter: unknown): () => void };
+      logger?: Logger;
+    };
+    let released = false;
+    let release: (() => void) | undefined;
+
+    void (async () => {
+      const [{ PiAiAdapter }, { createProvider }, { openAICompletionsApi }, { resolveRetryPolicy }] = await Promise.all([
+        import("@deepseek-ai/dsh-llm-pi-ai"),
+        import("@earendil-works/pi-ai"),
+        import("@earendil-works/pi-ai/api/openai-completions.lazy"),
+        import("@deepseek-ai/dsh-llm"),
+      ]);
+      if (released) return;
+
+      const adapter = createHubAdapter({
+        provider: providerId,
+        shimBaseUrl: shim.baseUrl(),
+        shimToken: shim.token(),
+        models,
+        createProvider,
+        openAICompletionsApi,
+        resolveRetryPolicy,
+        PiAiAdapter,
+      });
+
+      if (released) return;
+      release = host.llm.registerAdapter([providerId], adapter);
+
+      // 注册之后再自检一次：真的问 adapter 要一遍模型列表。
+      // 「registerAdapter 没报错」不足以证明能用 —— P0 就是这么骗过验收的。
+      try {
+        const listed = await adapter.listModels(providerId);
+        const ids = listed.map((m: { id: string }) => m.id);
+        if (ids.length === 0) {
+          host.logger?.warn?.("dsh-model-hub: provider 注册成功但模型列表为空 —— 检查 provider.ts 的 piProvider");
+          await report({ ok: false, modelCount: 0, modelIds: [], error: "listModels returned no models" });
+          return;
+        }
+        host.logger?.info?.(`dsh-model-hub: provider 注册完成（${ids.length} 个模型可被选中）`);
+        await report({ ok: true, modelCount: ids.length, modelIds: ids });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        host.logger?.error?.("dsh-model-hub: provider 注册后自检失败", error);
+        await report({ ok: false, modelCount: 0, error: message });
+      }
+    })().catch(async (error: unknown) => {
+      const message = error instanceof Error ? error.message : String(error);
+      host.logger?.error?.("dsh-model-hub: provider 注册失败", error);
+      await report({ ok: false, modelCount: 0, error: message }).catch(() => {});
+    });
+
+    return () => {
+      released = true;
+      release?.();
+    };
+  };
 }
 
 /**
@@ -233,11 +357,18 @@ export async function startChannelRuntime(deps: ChannelRuntimeDeps): Promise<Run
       logger.warn?.(`dsh-model-hub: ${channelId} 目录为空，不上架 adapter`);
       return;
     }
-    adapterRelease = deps.registerAdapter(deps.ctx, channelId, models, async (outcome) => {
+    adapterRelease = registerAdapter(deps.ctx, channelId, models, async (outcome) => {
       logger.info?.(
         `dsh-model-hub: ${channelId} provider 注册结果 ok=${outcome.ok} models=${outcome.modelCount}` +
           (outcome.error === undefined ? "" : ` error=${outcome.error}`),
       );
+      // 注册时的 shim 地址与目录条数只有这里知道，随回报带给调用方（status.json）
+      await deps.onRegisterReport?.({
+        ...outcome,
+        provider: channelId,
+        shim: shim.baseUrl(),
+        catalogCount: models.length,
+      });
     });
   }
 
@@ -262,6 +393,10 @@ export async function startChannelRuntime(deps: ChannelRuntimeDeps): Promise<Run
     },
     record: makeRecorder(db, channelId, () => deps.settings().recordEnabled !== false),
   });
+
+  // 上架实现的最终选定要等 shim 起好：生产缺省（createRegisterAdapter）要把
+  // 地址/密钥绑进 adapter；测试在 deps.registerAdapter 传 fake。
+  const registerAdapter = deps.registerAdapter ?? createRegisterAdapter(shim);
 
   models = await fetchCatalogForHead();
   panelEntries = toPanelEntries(models);

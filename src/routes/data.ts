@@ -7,6 +7,8 @@ import {
   queryRequests,
   querySummary,
 } from "../store/queries.js";
+import type { HubSettings } from "../state/hub-state.js";
+import type { PanelEntry } from "../state/runtime.js";
 
 /** 面板数据路由前缀。客户端与这里必须一致。 */
 export const DATA_PREFIX = "/plugins/dsh-model-hub";
@@ -66,6 +68,18 @@ export function registerDataRoutes(
      * 这一栏存在的唯一理由就是能被整段贴进问题反馈）。
      */
     diag?: () => Record<string, unknown>;
+    /**
+     * 渠道 → 该渠道面板目录条目（runtime 化之后目录按渠道挂在 state 上）。
+     * `/channels` 响应加 `models_by_channel` 键（任务 9 裁定 2）；不注入时
+     * 恒为 `{}` —— 旧客户端读到的是空映射而不是 undefined，不用改判空。
+     */
+    modelsByChannel?: () => Record<string, PanelEntry[]>;
+    /**
+     * volatile 设置现读，供 `/diag` 补 `recordEnabled`（缺省开）与
+     * `retentionDays`（缺省 90）—— 与 config.ts 的默认值一致。形状与
+     * HubSettings 相同；getter 每请求现调，改设置即时生效。
+     */
+    settings?: () => HubSettings;
   },
 ): void {
   ctx.inject(["webServer"], (inner: any) => {
@@ -112,7 +126,12 @@ export function registerDataRoutes(
             path: `${DATA_PREFIX}/channels`,
             handler: (req: any, res: any) => {
               if (!gate(req, res)) return;
-              json(res, 200, { channels: queryChannels(deps.db), accounts: queryAccounts(deps.db) });
+              json(res, 200, {
+                channels: queryChannels(deps.db),
+                accounts: queryAccounts(deps.db),
+                // 纯增量键（裁定 2）：现有 channels/accounts 键原样不动
+                models_by_channel: deps.modelsByChannel?.() ?? {},
+              });
             },
           }),
           inner.webServer.register({
@@ -120,7 +139,14 @@ export function registerDataRoutes(
             path: `${DATA_PREFIX}/diag`,
             handler: (req: any, res: any) => {
               if (!gate(req, res)) return;
-              json(res, 200, { ...queryDiagFacts(deps.db), ...(deps.diag?.() ?? {}) });
+              const settings = deps.settings?.();
+              json(res, 200, {
+                ...queryDiagFacts(deps.db),
+                ...(deps.diag?.() ?? {}),
+                // 放在展开之后：这两个键以设置为准，不被 diag 覆盖写法影响
+                recordEnabled: settings?.recordEnabled !== false,
+                retentionDays: settings?.retentionDays ?? 90,
+              });
             },
           }),
         ];

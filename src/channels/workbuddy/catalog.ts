@@ -1,8 +1,13 @@
 import { randomUUID } from "node:crypto";
 import type { ChannelModel } from "../types.js";
 
-/** 桌面端 UA —— 上游按客户端通道裁剪配置，CLI UA 会少给模型和促销字段。 */
-const DESKTOP_UA = "WorkBuddy/5.12.1 WorkBuddy/5.12.1 CLI/2.63.2";
+/**
+ * 桌面端 UA —— 上游按客户端通道裁剪配置，CLI UA 会少给模型和促销字段。
+ *
+ * 导出收口（任务 9 裁定 1）：shim 的 prepare（runtime.ts）与目录拉取（这里）
+ * 必须是同一个值，字面量各抄一份迟早漂 —— 全仓库只此一处定义。
+ */
+export const DESKTOP_UA = "WorkBuddy/5.12.1 WorkBuddy/5.12.1 CLI/2.63.2";
 
 export function upstreamBase(region: "cn" | "global"): string {
   return region === "global" ? "https://www.workbuddy.ai" : "https://copilot.tencent.com";

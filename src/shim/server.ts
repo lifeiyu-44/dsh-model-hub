@@ -18,6 +18,16 @@ export interface ShimDeps {
 
 export interface ShimHandle {
   baseUrl(): string;
+  /**
+   * 本次进程内生成的 Bearer 密钥。
+   *
+   * **必须把真值交出去**：pi-ai 侧的 `resolveApiKey` 拿到的就是这个字符串，
+   * 它会被塞进 `Authorization: Bearer <它>` 发回 shim 自己。
+   * 早先这里没暴露，`resolveApiKey` 只好返回字面量 `"shim"` ——
+   * 于是**每一个真实请求都会被自己的 shim 以 401 拒掉**，
+   * 而单测全绿（因为测试直接拿这个密钥发请求，绕过了 pi-ai 那一侧）。
+   */
+  token(): string;
   close(): void;
 }
 
@@ -165,6 +175,7 @@ export async function startShim(deps: ShimDeps): Promise<ShimHandle> {
 
   return {
     baseUrl: () => `http://127.0.0.1:${address.port}`,
+    token: () => secret,
     close: () => server.close(),
   };
 }

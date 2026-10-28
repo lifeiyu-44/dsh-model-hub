@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { resolveDshHome } from "@deepseek-ai/dsh-home-paths";
 import { Config } from "./config.js";
@@ -9,6 +10,7 @@ import { startShim } from "./shim/server.js";
 import { detectCredential } from "./channels/workbuddy/auth.js";
 import { readWorkbuddyVault } from "./channels/workbuddy/vault.js";
 import { fetchCatalog, upstreamBase, conversationIdentityHeaders } from "./channels/workbuddy/catalog.js";
+import { createHubAdapter } from "./provider.js";
 
 export const name = "dsh-model-hub";
 export { Config };
@@ -122,7 +124,16 @@ function applyInner(ctx: any, config: any): void {
       },
     });
 
-    const release = registerProvider(ctx, shim.baseUrl(), models);
+    const release = registerProvider(ctx, shim.baseUrl(), shim.token(), models, async (outcome) => {
+      // 注册是异步的，而且「注册成功」不等于「能出模型」—— 所以结果由
+      // registerProvider 自检完再回报，不是在这里假定。
+      await writeStatus(ctx, {
+        ...outcome,
+        provider: PROVIDER_GLOBAL,
+        shim: shim.baseUrl(),
+        catalogCount: models.length,
+      });
+    });
 
     ctx.effect(() => () => {
       release();
@@ -152,50 +163,117 @@ function applyInner(ctx: any, config: any): void {
 }
 
 /**
+ * 把「本次启动实际注册成什么样」写成一个可审计的文件。
+ *
+ * 起因：P0 曾出现「provider 在 `llm/listProviders` 里、但模型列表是空的」这种
+ * **假成功**。当时没有任何外部可见的证据能区分「注册成功」与「注册了个空壳」，
+ * 只能靠人去 UI 里点。这个文件让部署脚本和人都能一眼看到真实结果。
+ *
+ * 写入失败一律吞掉 —— 诊断文件写不出来不能影响插件本身。
+ */
+async function writeStatus(
+  ctx: any,
+  status: {
+    ok: boolean;
+    provider?: string;
+    modelCount: number;
+    modelIds?: string[];
+    catalogCount?: number;
+    shim?: string;
+    error?: string;
+  },
+): Promise<void> {
+  try {
+    const dir = join(resolveDshHome(), HUB_DIR_NAME);
+    await mkdir(dir, { recursive: true, mode: 0o700 });
+    await writeFile(
+      join(dir, "status.json"),
+      JSON.stringify({ ...status, at: new Date().toISOString(), pid: process.pid }, null, 2),
+      { encoding: "utf8", mode: 0o600 },
+    );
+  } catch (error) {
+    ctx.logger?.warn?.("dsh-model-hub: 状态文件写入失败（不影响插件）", error);
+  }
+}
+
+/**
  * 注册 provider。
  *
- * 用宿主自己的 `PiAiAdapter`（`dsh-llm-pi-ai` 导出），而不是手写一个 LlmAdapter：
- * 它已经把 OpenAI 兼容协议的流、工具调用、图片、重试都封好了，我们只需要
- * 把 baseUrl 指向自己的 shim。
+ * ## 为什么不是「把配置文档形状塞进 profiles()」
+ *
+ * `PiAiAdapter` 的 `profiles()` 收的**不是** `dsh-llm-pi-ai` 设置文档里的
+ * provider 条目（`api` / `baseURL` / `models` 那套），而是那个模块
+ * **已经解析完**的内部 profile 形状。它的 `current()` 只做一件事：
+ *
+ * ```js
+ * for (const profile of profiles.values())
+ *   if (profile.piProvider !== undefined) models.setProvider(profile.piProvider);
+ * ```
+ *
+ * 也就是说模型全部来自 `profile.piProvider` —— 一个 pi-ai 的 provider 对象。
+ * 少了它，`models` 集合是空的：`listModels()` 返回 `[]`，
+ * `resolveModel()` 在 `profile.modelErrors.get(...)` 上踩空抛裸 TypeError。
+ *
+ * **这个坑的可怕之处在于它「看起来成功了」**：`registerAdapter` 不报错、
+ * `llm/listProviders` 里能看到 `hub-workbuddy-global`，只有真的去选模型
+ * 才会发现一个都没有。P0 就是这样验收漏掉的 —— 只查了 provider 在不在列表里。
+ *
+ * 形状转换本身在 `provider.ts`（独立可测），这里只负责装配与注册。
  */
 function registerProvider(
   ctx: any,
   shimBaseUrl: string,
+  shimToken: string,
   models: Awaited<ReturnType<typeof fetchCatalog>>,
+  report: (outcome: { ok: boolean; modelCount: number; modelIds?: string[]; error?: string }) => Promise<void>,
 ): () => void {
-  // 动态 import：只有真正注册时才加载 pi-ai，避免没凭据时白拉一次依赖。
   let released = false;
   let release: (() => void) | undefined;
 
   void (async () => {
-    const { PiAiAdapter } = await import("@deepseek-ai/dsh-llm-pi-ai");
+    const [{ PiAiAdapter }, { createProvider }, { openAICompletionsApi }, { resolveRetryPolicy }] = await Promise.all([
+      import("@deepseek-ai/dsh-llm-pi-ai"),
+      import("@earendil-works/pi-ai"),
+      import("@earendil-works/pi-ai/api/openai-completions.lazy"),
+      import("@deepseek-ai/dsh-llm"),
+    ]);
     if (released) return;
-    const adapter = new PiAiAdapter({
-      profiles: () =>
-        new Map([
-          [
-            PROVIDER_GLOBAL,
-            {
-              provider: PROVIDER_GLOBAL,
-              api: "openai-completions",
-              baseUrl: shimBaseUrl,
-              apiKey: "shim",
-              models: models.map((m) => ({
-                id: m.id,
-                name: m.name,
-                contextWindow: m.contextWindow,
-                maxTokens: m.maxTokens,
-                input: m.supportsImages ? ["text", "image"] : ["text"],
-              })),
-            },
-          ],
-        ]),
-      auth: { kind: "api-key" },
-      resolveApiKey: async () => "shim",
-    } as any);
+
+    const adapter = createHubAdapter({
+      provider: PROVIDER_GLOBAL,
+      shimBaseUrl,
+      shimToken,
+      models,
+      createProvider,
+      openAICompletionsApi,
+      resolveRetryPolicy,
+      PiAiAdapter,
+    });
+
+    if (released) return;
     release = ctx.llm.registerAdapter([PROVIDER_GLOBAL], adapter);
-  })().catch((error: unknown) => {
+
+    // 注册之后再自检一次：真的问 adapter 要一遍模型列表。
+    // 「registerAdapter 没报错」不足以证明能用 —— P0 就是这么骗过验收的。
+    try {
+      const listed = await adapter.listModels(PROVIDER_GLOBAL);
+      const ids = listed.map((m: { id: string }) => m.id);
+      if (ids.length === 0) {
+        ctx.logger?.warn?.("dsh-model-hub: provider 注册成功但模型列表为空 —— 检查 provider.ts 的 piProvider");
+        await report({ ok: false, modelCount: 0, modelIds: [], error: "listModels returned no models" });
+        return;
+      }
+      ctx.logger?.info?.(`dsh-model-hub: provider 注册完成（${ids.length} 个模型可被选中）`);
+      await report({ ok: true, modelCount: ids.length, modelIds: ids });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      ctx.logger?.error?.("dsh-model-hub: provider 注册后自检失败", error);
+      await report({ ok: false, modelCount: 0, error: message });
+    }
+  })().catch(async (error: unknown) => {
+    const message = error instanceof Error ? error.message : String(error);
     ctx.logger?.error?.("dsh-model-hub: provider 注册失败", error);
+    await report({ ok: false, modelCount: 0, error: message }).catch(() => {});
   });
 
   return () => {

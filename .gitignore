@@ -2,3 +2,11 @@ node_modules/
 lib/
 *.log
 .DS_Store
+
+# 部署脚本每次运行都会在 backup/ 下留一份 profile 快照（含本机路径与
+# 别人的插件配置），那是本机运行产物，不进仓库。
+backup/
+
+# 临时探针 / 端到端调试脚本
+_probe.*
+_e2e.*

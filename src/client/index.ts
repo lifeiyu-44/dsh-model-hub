@@ -29,21 +29,22 @@ export const name = "dsh-model-hub-client";
 /**
  * 依赖的客户端服务。
  *
- * **必须与 package.json 的 `dsh.client.inject` 语义一致。**
+ * 与参考实现 `dsh-connect-workbuddy` 完全一致：`["slots", "locale"]`。
  *
- * 实测事故（2026-10-28）：这里只写了 `slots`，插件能加载、卡片能渲染，
- * 但**模型选择器打不开** —— 报
+ * 实测事故（2026-10-28）：「模型选择器打不开」报
  * `cannot get property "remote.session" without inject`。
  *
- * 根因不在 inject 列表本身（参考插件 `dsh-connect-workbuddy` 只声明
- * `["slots","locale"]` 也正常），而在**注册 slot 时没给 `inject` 回调**：
- * 宿主的默认注入路径会调 `directoryFor()`，那条路要 `remote.session`。
- * 参考实现给每个 slot 都传了 `inject: () => ({ ...props })`，
- * 走的是显式 props 而不是默认注入路径 —— 所以它不需要声明 remote。
+ * 排查过程与结论（重要，避免以后重犯）：
+ * - 第一次猜是 inject 少声明，加了 `remote` → **更糟**：manifest 里我们的
+ *   inject 变成 5 项，而正常工作的插件是 4 项；声明 `@deepseek-ai/dsh-api-remotes`
+ *   反而让宿主经由它去解析 `remote.session`，继续抛。
+ * - 真正的修法是给 slot 传 `inject` 回调（见下面 `register`），
+ *   让组件走显式 props 而不是宿主的默认注入路径。
  *
- * 两处都补：inject 声明里加 `remote`（防御），注册时给 `inject` 回调（治本）。
+ * 所以这里**不要**加 `remote`。宿主渲染路径要什么服务是它自己的事，
+ * 我们只声明自己真正用的。
  */
-export const inject = ["slots", "locale", "remote"];
+export const inject = ["slots", "locale"];
 
 export function apply(ctx: any): void {
   try {

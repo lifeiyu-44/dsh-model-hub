@@ -66,35 +66,31 @@ describe("client.js 能被宿主的 loader 加载", () => {
   });
 
   /**
-   * 回归锚点：inject 少声明会**打不开模型选择器**。
+   * 回归锚点：inject 必须与正常工作的参考插件一致。
    *
-   * 实测事故（2026-10-28）：`inject` 只有 `["slots"]` 时，插件能加载、
-   * 卡片能渲染，但模型选择器报
+   * 实测事故（2026-10-28）：「模型选择器打不开」报
    * `cannot get property "remote.session" without inject`。
-   * 因为宿主渲染设置卡片的路径要 `remote.session`（来自 dsh-api-remotes）。
+   *
+   * 排查中曾误以为要加 `remote`，结果**更糟** —— 声明
+   * `@deepseek-ai/dsh-api-remotes` 反而让宿主经由它去解析 `remote.session`。
+   * 正常工作的 `dsh-connect-workbuddy` 用的是 4 项（不含 api-remotes）。
+   *
+   * 真正的修法是给 slot 传 inject 回调（见下一条测试）。
+   * 这里守的是「不要自作聪明往 inject 里加 remote」。
    */
-  it("声明了渲染路径需要的服务（remote / locale）", () => {
-    expect(loaded.inject).toContain("remote");
+  it("inject 只声明自己用的服务，不含 remote（加了反而更糟）", () => {
+    expect(loaded.inject).toContain("slots");
     expect(loaded.inject).toContain("locale");
+    expect(loaded.inject).not.toContain("remote");
   });
 
-  it("package.json 的 dsh.client.inject 与客户端实际声明一致", () => {
+  it("package.json 的 dsh.client.inject 不含 api-remotes", () => {
     const pkg = JSON.parse(readFileSync(join(ROOT, "package.json"), "utf8"));
     const declared: string[] = pkg.dsh?.client?.inject ?? [];
-
-    // 宿主包名 -> 运行时服务名
-    const serviceOf: Record<string, string> = {
-      "@deepseek-ai/dsh-api-remotes": "remote",
-      "@deepseek-ai/dsh-client-locale": "locale",
-      "@deepseek-ai/dsh-client-ui-slots": "slots",
-    };
-
-    for (const [pkgName, service] of Object.entries(serviceOf)) {
-      if (!declared.includes(pkgName)) continue;
-      expect(loaded.inject, `${pkgName} 声明了但客户端 inject 里没有 ${service}`).toContain(service);
-    }
-    if (loaded.inject.includes("remote")) expect(declared).toContain("@deepseek-ai/dsh-api-remotes");
-    if (loaded.inject.includes("locale")) expect(declared).toContain("@deepseek-ai/dsh-client-locale");
+    expect(declared).not.toContain("@deepseek-ai/dsh-api-remotes");
+    // 但该有的得有
+    expect(declared).toContain("@deepseek-ai/dsh-client-ui-slots");
+    expect(declared).toContain("@deepseek-ai/dsh-client-locale");
   });
 
   it("apply 不抛，并注册了预期的 slot", () => {

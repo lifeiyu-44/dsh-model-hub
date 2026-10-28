@@ -5,7 +5,7 @@ import { join } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import { openHubDatabase } from "../src/store/db.js";
 import { seedChannelsAndAccounts, type AccountSeed, type ChannelSeed } from "../src/store/seed.js";
-import { markAccountResult } from "../src/store/mutations.js";
+import { markAccountResult, softDeleteAccount } from "../src/store/mutations.js";
 import { queryAccounts } from "../src/store/queries.js";
 import type { HubState } from "../src/state/hub-state.js";
 import type { QoderSession } from "../src/channels/qoder/credentials.js";
@@ -234,6 +234,53 @@ describe("oneClickAuth · WorkBuddy", () => {
     expect(missing!.detail).toContain("文件不存在");
     expect(wb.sources.some((s) => s.source === vaultSource && s.status === "ok")).toBe(true);
     expect(wb.status).toBe("ok"); // 渠道级聚合只统计存在的来源：vault 可用即 ok，缺失提示只进展示
+  });
+
+  it("软删 vault 账号后再扫 → accountsAdded 不含它（全集 id 去重），软删行不复活", async () => {
+    newHome();
+    const database = await freshDb();
+    const { state } = fakeState(database);
+    seedVault("acc-gone", "vault-tok-2");
+
+    const first = await oneClickAuth({}, database, state);
+    expect(channelOf(first, GLOBAL_CHANNEL).accountsAdded).toBe(1);
+
+    // 用户删掉这个账号（软删，credential 文件还在 vault 里）
+    softDeleteAccount(database, `${GLOBAL_CHANNEL}:acc-gone`);
+
+    // 再点一键认证：seed 守卫本就拦下复活，报告不得把这个 id 报成「新增」——
+    // 旧代码只对 live 去重，软删 id 会漏进 fresh，accountsAdded 虚报 1。
+    const second = await oneClickAuth({}, database, state);
+    const wb = channelOf(second, GLOBAL_CHANNEL);
+    expect(wb.accountsAdded, "软删 id 不得计入 accountsAdded").toBe(0);
+    expect(queryAccounts(database)).toHaveLength(0); // 不复活
+    const raw = database.prepare("SELECT deleted FROM accounts WHERE id = ?").get(`${GLOBAL_CHANNEL}:acc-gone`) as any;
+    expect(raw.deleted).toBe(1);
+  });
+
+  it("外层 fail-soft：WB 分支意外抛错时文案过 redact（扫描到的 token 不进报告）", async () => {
+    newHome();
+    const database = await freshDb();
+    const secret = "wb-secret-token-9f";
+    const plainPath = writeWorkbuddyAuth(join(home, "leak.info"), plainAuthDoc(secret));
+    pinEnv("WORKBUDDY_AUTH_FILE", plainPath); // 扫描先读到这个 token（收集进 secrets）
+    const state = {
+      ensureRuntime: async () => {},
+      syncChannelRuntime: async () => {},
+      // 池查询抛错且错误文案里嵌着刚扫到的 token（模拟意外异常回显敏感值）
+      poolSize: () => { throw new Error(`池查询爆炸：${secret}`); },
+    } as unknown as HubState;
+
+    const report = await oneClickAuth({}, database, state);
+    const wb = channelOf(report, GLOBAL_CHANNEL);
+
+    expect(wb.status).toBe("missing"); // fail-soft：渠道折成 missing，不拖垮整体
+    expect(wb.sources[0].status).toBe("error");
+    expect(wb.sources[0].detail).toContain("扫描失败");
+    expect(JSON.stringify(report)).not.toContain(secret);
+    expect(wb.sources[0].detail).toContain("（PAT 已隐去）");
+    // Qoder 渠道照常出报告（fail-soft 不串渠道）
+    expect(channelOf(report, QODER_CHANNEL).status).toBe("missing");
   });
 });
 

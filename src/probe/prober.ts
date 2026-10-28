@@ -26,10 +26,12 @@ import type { HubState } from "../state/hub-state.js";
  * ## 凭据纪律（本模块最重的一条）
  *
  * 报告 detail 与日志里只允许出现**文件路径**与 **PAT 前 6 位**（`pt-abc123…`），
- * 绝不出现完整 token。redact 覆盖全部三个入口的错误路径：oneClickAuth（探测）、
- * testAccount（detail 会经 markAccountResult 落进 DB last_error）、addQoderPat
- * （异常原文会 rethrow 给路由层进 API 响应）—— live exchangePat 的文案内嵌上游
- * 响应体前 200 字符，上游若回显 personal_token 就是泄漏面。
+ * 绝不出现完整 token。redact 覆盖全部三个入口的错误路径：oneClickAuth（探测；
+ * 两个渠道的外层 fail-soft catch 也用**各自扫描已收集的 secrets** 过同一口径
+ * —— 意外异常的原文可能回显敏感值）、testAccount（detail 会经
+ * markAccountResult 落进 DB last_error）、addQoderPat（异常原文会 rethrow 给
+ * 路由层进 API 响应）—— live exchangePat 的文案内嵌上游响应体前 200 字符，
+ * 上游若回显 personal_token 就是泄漏面。
  * addQoderPat 验活/登记失败时删掉刚写的文件 —— 不留死 PAT。
  */
 
@@ -164,8 +166,12 @@ function pickSlug(db: DatabaseSync, dir: string, pat: string, displayName: strin
  * 哪些缺失进 sources：用户**显式指定**的 WORKBUDDY_AUTH_FILE 缺失必须报
  * （那正是要被告知的错配）；LOCALAPPDATA/APPDATA 下的固定候选缺失不逐条报，
  * 但零来源时会合成一条把搜索过的路径全部亮出来，让用户能照着行动。
+ *
+ * `secrets` 由调用方持有并就地填充（扫到的明文 token）：本函数正常返回时它
+ * 只用于兜底；抛出意外异常时外层 fail-soft catch 拿**已收集的部分**过 redact
+ * —— 收集必须边扫边做，事后补不回来。
  */
-function probeWorkbuddySources(): { sources: OneClickSource[]; present: OneClickSource[]; entries: ReturnType<typeof listVaultEntries> } {
+function probeWorkbuddySources(secrets: string[]): { sources: OneClickSource[]; present: OneClickSource[]; entries: ReturnType<typeof listVaultEntries> } {
   const sources: OneClickSource[] = [];
   const present: OneClickSource[] = [];
   const candidates = authCandidates();
@@ -178,14 +184,18 @@ function probeWorkbuddySources(): { sources: OneClickSource[]; present: OneClick
       continue;
     }
     let kind: AuthKind = "missing";
+    let token: string | undefined;
     try {
-      kind = parseAuthDocument(readFileSync(path, "utf8")).kind;
+      const parsed = parseAuthDocument(readFileSync(path, "utf8"));
+      kind = parsed.kind;
+      if (parsed.kind === "plain" && parsed.token !== undefined) token = parsed.token;
     } catch (error) {
       const bad: OneClickSource = { source: path, status: "error", detail: `${path}（读取失败：${messageOf(error)}）` };
       sources.push(bad);
       present.push(bad);
       continue;
     }
+    if (token !== undefined) secrets.push(token);
     const entry: OneClickSource = {
       source: path,
       status: kind === "plain" ? "ok" : kind,
@@ -218,13 +228,15 @@ function probeWorkbuddySources(): { sources: OneClickSource[]; present: OneClick
  * Qoder 侧来源枚举：旧 `<dshHome>/qoder/pat` + env（pt- 开头才收）+
  * `<dshHome>/model-hub/qoder-pats/*.pat`，逐个 exchangePat 验活。
  * 没有凭据的机器 sources 为空 —— 渠道级即 missing。
+ *
+ * `pats` 由调用方持有（与 {@link probeWorkbuddySources} 的 secrets 同一角色）：
+ * 内部逐条 redact 用它，意外异常冒出时外层 fail-soft catch 用同一份兜底。
  */
-async function probeQoderSources(deps: ProberDeps): Promise<OneClickSource[]> {
+async function probeQoderSources(deps: ProberDeps, pats: string[]): Promise<OneClickSource[]> {
   const home = deps.dshHome ?? resolveDshHome();
   const exchange = deps.exchangePat ?? exchangePatLive;
   const sources: OneClickSource[] = [];
   const candidates: { source: string; pat: string }[] = [];
-  const pats: string[] = [];
 
   const legacy = join(home, "qoder", "pat");
   if (existsSync(legacy)) {
@@ -270,19 +282,29 @@ async function probeQoderSources(deps: ProberDeps): Promise<OneClickSource[]> {
  */
 export async function oneClickAuth(deps: ProberDeps, db: DatabaseSync, state: HubState): Promise<OneClickReport> {
   const channels: OneClickChannel[] = [];
+  // 每个渠道一份「本次扫描已见过的 secrets」：正常时兜底用不上，
+  // 外层 fail-soft catch 的文案要拿它过 redact（M7：异常原文可能回显敏感值）。
+  const wbSecrets: string[] = [];
+  const qoderSecrets: string[] = [];
 
   try {
-    const { sources, present, entries } = probeWorkbuddySources();
+    const { sources, present, entries } = probeWorkbuddySources(wbSecrets);
     let accountsAdded = 0;
     if (entries.length > 0) {
       const live = queryAccounts(db) as { id: string; channel_id: string }[];
-      const liveIds = new Set(live.map((r) => r.id));
       const channelHasLive = live.some((a) => a.channel_id === PROVIDER_GLOBAL);
+      // 去重必须对**全集 id（含软删）**：upsertOneAccount 的软删守卫（seed.ts）会
+      // 拦下重导入，若只对 live 去重，软删 id 会漏进 fresh、accountsAdded 虚报
+      // —— 用户删号后再扫会看到「接管 1 个账号」的假成功、账号却永不出现。
+      // 与 routes/write.ts 的 accounts/add 同款（I2）。
+      const taken = new Set(
+        (db.prepare("SELECT id FROM accounts").all() as { id: string }[]).map((row) => row.id),
+      );
       const channel: ChannelSeed = { id: PROVIDER_GLOBAL, kind: "workbuddy", displayName: "WorkBuddy Global" };
       const fresh: AccountSeed[] = [];
       for (const entry of entries) {
         const id = `${PROVIDER_GLOBAL}:${entry.accountId}`;
-        if (liveIds.has(id)) continue; // 幂等：已存在跳过，不计入 accountsAdded
+        if (taken.has(id)) continue; // 幂等：已存在（含软删）跳过，不计入 accountsAdded
         fresh.push({
           id,
           channelId: PROVIDER_GLOBAL,
@@ -305,19 +327,19 @@ export async function oneClickAuth(deps: ProberDeps, db: DatabaseSync, state: Hu
     channels.push({
       id: PROVIDER_GLOBAL,
       status: "missing",
-      sources: [{ source: "workbuddy", status: "error", detail: `扫描失败：${messageOf(error)}` }],
+      sources: [{ source: "workbuddy", status: "error", detail: `扫描失败：${redact(messageOf(error), wbSecrets)}` }],
       accountsAdded: 0,
     });
   }
 
   try {
-    const sources = await probeQoderSources(deps);
+    const sources = await probeQoderSources(deps, qoderSecrets);
     channels.push({ id: PROVIDER_QODER, status: channelStatusOf(sources), sources, accountsAdded: 0 });
   } catch (error) {
     channels.push({
       id: PROVIDER_QODER,
       status: "missing",
-      sources: [{ source: "qoder", status: "error", detail: `扫描失败：${messageOf(error)}` }],
+      sources: [{ source: "qoder", status: "error", detail: `扫描失败：${redact(messageOf(error), qoderSecrets)}` }],
       accountsAdded: 0,
     });
   }

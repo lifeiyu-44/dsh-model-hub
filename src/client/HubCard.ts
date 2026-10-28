@@ -114,9 +114,9 @@ export function HubCard(): React.ReactElement {
       // 旧 host 不带 models_by_channel 键：当 `{}` 消费，展开行显示「目录为空」而不是崩
       setModelsByChannel(channelData.models_by_channel ?? {});
       setDiag(diagData);
-      // 每轮数据刷新都作废上一轮的单账号测试结果（终审 M5）：账号可能已被
-      // 删除/重配，旧「✓/✗」对不上新的数据面，留着只会误导。
-      setTestResults(new Map());
+      // testResults 不随 load() 清空（终审 M5 收口后的语义）：「✓/✗」是用户
+      // 手动点的测试结论，一次普通的数据刷新推不出它过期 —— 常驻到下次点
+      // 测试覆盖、或账号被删除（删除路径里同步移除该 id，见删除按钮）。
       setError(undefined);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));
@@ -254,7 +254,18 @@ export function HubCard(): React.ReactElement {
                 // 能把账号找回来（终审 M1）；「凭据文件不受影响」保留，避免
                 // 用户误以为删除会动 vault/PAT 文件。
                 if (!window.confirm(`删除账号 ${account.display_name}？删除后无法从面板恢复（凭据文件不受影响）`)) return;
-                void run(`del:${account.id}`, () => hubApi.deleteAccount(account.id))();
+                void run(`del:${account.id}`, async () => {
+                  await hubApi.deleteAccount(account.id);
+                  // testResults 的残留风险只来自「删除/重加同 id 账号」（终审
+                  // M5 收口）：删掉的账号不再回显它的 ✓/✗，重加同 id 也不会
+                  // 被上一次的结论顶替。换新 Map —— React 以引用比对 state。
+                  setTestResults((prev) => {
+                    if (!prev.has(account.id)) return prev;
+                    const next = new Map(prev);
+                    next.delete(account.id);
+                    return next;
+                  });
+                })();
               },
             }, "删除"),
           ),

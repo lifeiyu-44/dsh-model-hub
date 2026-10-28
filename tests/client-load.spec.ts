@@ -390,6 +390,7 @@ describe("解禁后的 HubCard 交互（真 React 渲染）", () => {
     [`${PREFIX}/records?limit=4`]: { requests: [], models: [] },
     [`${PREFIX}/catalog`]: { models: [] },
     [`${PREFIX}/account/${encodeURIComponent(ACCOUNT_ID)}/test`]: { ok: true, detail: "目录拉取成功（mock）", ms: 12 },
+    [`${PREFIX}/account/${encodeURIComponent(ACCOUNT_ID)}/delete`]: { ok: true },
     [`${PREFIX}/accounts/add`]: { ok: true, added: ["hub-qoder-cn:pat-abcdef"] },
     [`${PREFIX}/diag`]: {
       recordCount: 5, oldestRecordAt: null, lastError: null,
@@ -557,7 +558,7 @@ describe("解禁后的 HubCard 交互（真 React 渲染）", () => {
     expect(posts, "取消删除不得发出任何写请求").toHaveLength(0);
   });
 
-  it("load() 清空单账号测试结果：数据刷新后「✓」不残留（旧结果对不上新数据面）", async () => {
+  it("测试结果常驻：点测试后 ✓ 立即回显，且随 load() 刷新保留（不再无条件清空）", async () => {
     const tab = buttonByLabel("账号");
     await act(async () => {
       tab!.click();
@@ -568,11 +569,39 @@ describe("解禁后的 HubCard 交互（真 React 渲染）", () => {
       test!.click();
     });
     expect(posts.some((p) => p.url.includes("/test")), "测试应发出 account/test").toBe(true);
+    expect(container.textContent, "测试结果应立即回显并常驻").toContain("✓");
     const refresh = buttonByLabel("刷新");
     await act(async () => {
       refresh!.click();
     });
-    expect(container.textContent).not.toContain("✓");
+    // testResults 的残留风险只来自「删除/重加同 id 账号」，与数据刷新无关
+    expect(container.textContent, "刷新不得清掉测试结果").toContain("✓");
+  });
+
+  it("删除账号后，该账号的测试结果条目随之移除（M5 的真实收口）", async () => {
+    const tab = buttonByLabel("账号");
+    await act(async () => {
+      tab!.click();
+    });
+    posts.length = 0;
+    const test = buttonByLabel("测试");
+    await act(async () => {
+      test!.click();
+    });
+    expect(container.textContent, "前置：本用例先点出一条测试结果").toContain("✓");
+    const prevConfirm = (globalThis as any).confirm;
+    (globalThis as any).confirm = () => true;
+    try {
+      posts.length = 0;
+      const del = buttonByLabel("删除");
+      await act(async () => {
+        del!.click();
+      });
+    } finally {
+      (globalThis as any).confirm = prevConfirm;
+    }
+    expect(posts.some((p) => p.url.includes("/delete")), "删除应发出 account/delete").toBe(true);
+    expect(container.textContent, "被删账号的测试结果必须随之清掉").not.toContain("✓");
   });
 
   it("AddAccountModal：PAT 首尾带空白也能过前端格式门，提交的是 trim 后的值", async () => {

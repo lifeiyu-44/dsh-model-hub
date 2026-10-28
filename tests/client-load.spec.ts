@@ -1,4 +1,4 @@
-import { describe, expect, it, beforeAll } from "vitest";
+import { describe, expect, it, beforeAll, afterAll } from "vitest";
 import { readFileSync, existsSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -181,5 +181,290 @@ describe("client.js 能被宿主的 loader 加载", () => {
 
   it("ctx.slots 整个缺失时也不抛", () => {
     expect(() => loaded.apply({} as any)).not.toThrow();
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════════════
+// 任务 10：解禁后的交互断言 —— 以真 React 渲染 `HubCard`。
+//
+// 为什么手写假 DOM：仓库约束「无新依赖」，jsdom / happy-dom 都没装。
+// 而 React 客户端渲染真正碰到的 DOM 面很小：一棵节点树、属性/样式的直接
+// 赋值、以及**事件委托**——React 把全部监听挂到 `createRoot` 的容器上，
+// 触发时只要拿容器的监听表调一遍即可。所以一个 ~120 行的假对象就够跑
+// `createRoot` + `act` + 派发 click，不需要真的实现 DOM 标准。
+//
+// 仍然遵守本文件的立意：fetch mock 成形如各只读/写路由的响应，
+// 让组件走真实的数据流（useEffect → load() → setState → 渲染）。
+// ══════════════════════════════════════════════════════════════════════════
+
+import React from "react";
+import { act } from "react";
+import { createRoot, type Root } from "react-dom/client";
+import { HubCard } from "../src/client/HubCard.js";
+
+/** 文本节点：React 只会读写 `nodeValue`。 */
+function createFakeText(text: string) {
+  return { nodeType: 3, nodeValue: text, parentNode: null } as any;
+}
+
+/**
+ * 假元素。要点：
+ * - `style` 是普通对象 + setProperty 占位 —— React 对样式做的是逐键赋值；
+ * - 属性进 Map（`className` 转发到 class），`disabled`/`value` 等走真属性；
+ * - `click()` 向上找根容器并调用其全部 click 监听 —— 这就是 React 的委托入口。
+ */
+class FakeElement {
+  nodeType = 1;
+  tagName: string;
+  parentNode: FakeElement | null = null;
+  childNodes: any[] = [];
+  ownerDocument: any;
+  style: Record<string, unknown> & { setProperty: (name: string, value: string) => void } = Object.assign(
+    {} as Record<string, unknown>,
+    { setProperty: () => {} },
+  );
+  listeners = new Map<string, ((event: any) => void)[]>();
+  attributes = new Map<string, string>();
+  disabled = false;
+  value = "";
+  checked = false;
+  hidden = false;
+  private text: string | null = null;
+
+  constructor(tag: string, doc: any) {
+    this.tagName = tag.toUpperCase();
+    this.ownerDocument = doc;
+  }
+
+  get className(): string {
+    return this.attributes.get("class") ?? "";
+  }
+  set className(value: string) {
+    this.attributes.set("class", value);
+  }
+  get firstChild(): any {
+    return this.childNodes[0] ?? null;
+  }
+  get lastChild(): any {
+    return this.childNodes[this.childNodes.length - 1] ?? null;
+  }
+  get textContent(): string {
+    if (this.text !== null) return this.text;
+    return this.childNodes.map((c) => (c.nodeType === 3 ? c.nodeValue : c.textContent)).join("");
+  }
+  set textContent(value: string) {
+    this.text = value;
+    this.childNodes = [];
+  }
+  appendChild(child: any): any {
+    child.parentNode?.removeChild(child);
+    child.parentNode = this;
+    this.text = null;
+    this.childNodes.push(child);
+    return child;
+  }
+  insertBefore(child: any, before: any): any {
+    child.parentNode?.removeChild(child);
+    const index = before === null ? -1 : this.childNodes.indexOf(before);
+    this.text = null;
+    if (index === -1) this.childNodes.push(child);
+    else this.childNodes.splice(index, 0, child);
+    child.parentNode = this;
+    return child;
+  }
+  removeChild(child: any): any {
+    const index = this.childNodes.indexOf(child);
+    if (index !== -1) this.childNodes.splice(index, 1);
+    child.parentNode = null;
+    return child;
+  }
+  setAttribute(name: string, value: string): void {
+    this.attributes.set(name, String(value));
+  }
+  getAttribute(name: string): string | null {
+    return this.attributes.get(name) ?? null;
+  }
+  removeAttribute(name: string): void {
+    this.attributes.delete(name);
+  }
+  hasAttribute(name: string): boolean {
+    return this.attributes.has(name);
+  }
+  addEventListener(type: string, listener: (event: any) => void): void {
+    const list = this.listeners.get(type) ?? [];
+    list.push(listener);
+    this.listeners.set(type, list);
+  }
+  removeEventListener(type: string, listener: (event: any) => void): void {
+    this.listeners.set(type, (this.listeners.get(type) ?? []).filter((fn) => fn !== listener));
+  }
+  click(): void {
+    let node: any = this;
+    while (node.parentNode !== null) node = node.parentNode;
+    const event = {
+      type: "click",
+      target: this,
+      bubbles: true,
+      cancelable: true,
+      button: 0,
+      detail: 1,
+      defaultPrevented: false,
+      preventDefault() {},
+      stopPropagation() {},
+    };
+    for (const listener of node.listeners?.get("click") ?? []) listener(event);
+  }
+  focus(): void {}
+  blur(): void {}
+}
+
+/** 假 document：ensureStyles 要 getElementById / createElement / head；Esc 监听走 addEventListener。 */
+class FakeDocument {
+  nodeType = 9;
+  head = new FakeElement("head", this);
+  body = new FakeElement("body", this);
+  documentElement = new FakeElement("html", this);
+  createElement(tag: string): FakeElement {
+    return new FakeElement(tag, this);
+  }
+  createElementNS(_ns: string, tag: string): FakeElement {
+    return new FakeElement(tag, this);
+  }
+  createTextNode(text: string): any {
+    return createFakeText(text);
+  }
+  createComment(): any {
+    return { nodeType: 8, nodeValue: "", parentNode: null };
+  }
+  getElementById(): null {
+    return null;
+  }
+  addEventListener(): void {}
+  removeEventListener(): void {}
+}
+
+function walk(node: any, out: any[] = []): any[] {
+  out.push(node);
+  for (const child of node.childNodes ?? []) walk(child, out);
+  return out;
+}
+
+describe("解禁后的 HubCard 交互（真 React 渲染）", () => {
+  const PREFIX = "/plugins/dsh-model-hub";
+  const CHANNEL_ID = "hub-workbuddy-global";
+  const ACCOUNT_ID = `${CHANNEL_ID}:alice`;
+  // 熔断中：cooldown_until 在未来 —— 状态点应变 err、meta 应出现「熔断中（至 …）」
+  const COOLDOWN_UNTIL = Date.now() + 5 * 60_000;
+
+  const responses: Record<string, unknown> = {
+    [`${PREFIX}/summary`]: {
+      date: "2026-10-28", requests: 0, ok: 0, tokens: 0, costUnits: 0, avgTtftMs: null, avgTps: null,
+    },
+    [`${PREFIX}/channels`]: {
+      channels: [
+        { id: CHANNEL_ID, kind: "workbuddy", display_name: "WorkBuddy Global", enabled: 1, today_requests: 3, today_tokens: 1200 },
+      ],
+      accounts: [
+        {
+          id: ACCOUNT_ID, channel_id: CHANNEL_ID, display_name: "alice", enabled: 1, is_current: 1,
+          consecutive_failures: 3, cooldown_until: COOLDOWN_UNTIL, last_error: "HTTP 401 Unauthorized",
+          last_ok_at: null, created_at: 0, has_credential: 1,
+        },
+      ],
+      models_by_channel: {
+        [CHANNEL_ID]: [
+          { id: "deepseek-chat", name: "DeepSeek Chat", creditMultiplier: 1 },
+          { id: "deepseek-reasoner", name: "DeepSeek Reasoner", creditMultiplier: 4, promotionBadge: "限时免费", tierBadge: "Pro" },
+        ],
+      },
+    },
+    [`${PREFIX}/records?limit=4`]: { requests: [], models: [] },
+    [`${PREFIX}/catalog`]: { models: [] },
+    [`${PREFIX}/diag`]: {
+      recordCount: 5, oldestRecordAt: null, lastError: null,
+      currentChannelId: CHANNEL_ID, currentAccountId: ACCOUNT_ID, currentAccountName: "alice",
+      recordEnabled: true, retentionDays: 90,
+    },
+  };
+
+  const fakeFetch = ((input: RequestInfo | URL) => {
+    const body = responses[String(input)];
+    if (body === undefined) {
+      return Promise.resolve({ ok: false, status: 404, json: async () => ({ error: `mock 未覆盖 ${String(input)}` }) });
+    }
+    return Promise.resolve({ ok: true, status: 200, json: async () => body } as Response);
+  }) as typeof fetch;
+
+  let container: FakeElement;
+  let root: Root;
+  const realFetch = globalThis.fetch;
+
+  beforeAll(async () => {
+    (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true; // act() 需要，否则 React 拒绝刷工作
+    // react-dom 的 getCurrentEventPriority 直接读 `window.event`（无 typeof 守卫），
+    // node 环境里必须有一个 window；指到 globalThis 本身即可（window.event === undefined）。
+    (globalThis as any).window = globalThis;
+    // getActiveElementDeep 里 `element instanceof win.HTMLIFrameElement` 的右边必须是个构造器，
+    // 否则 commit 阶段直接 TypeError；给个空类让它 instanceof 为 false 即可。
+    (globalThis as any).HTMLIFrameElement = class HTMLIFrameElement {};
+    (globalThis as any).document = new FakeDocument();
+    globalThis.fetch = fakeFetch;
+
+    container = new FakeElement("div", (globalThis as any).document);
+    root = createRoot(container as unknown as HTMLElement);
+    await act(async () => {
+      root.render(React.createElement(HubCard));
+    });
+  });
+
+  afterAll(() => {
+    globalThis.fetch = realFetch;
+  });
+
+  const buttons = (): FakeElement[] => walk(container).filter((n) => n.nodeType === 1 && n.tagName === "BUTTON");
+  const buttonByLabel = (label: string): FakeElement | undefined =>
+    buttons().find((b) => b.textContent === label);
+  // React 18 对 `disabled` 走 setAttribute（不再是 DOM property），两边都要看。
+  const isDisabled = (button: FakeElement): boolean => button.disabled || button.hasAttribute("disabled");
+
+  it("「一键认证」「+ 添加账号」「测试」「删除」不再是 disabled", () => {
+    for (const label of ["一键认证", "+ 添加账号", "测试", "删除"]) {
+      const button = buttonByLabel(label);
+      expect(button, `按钮「${label}」应该渲染`).toBeDefined();
+      expect(isDisabled(button!), `按钮「${label}」应该可点`).toBe(false);
+    }
+  });
+
+  it("渠道行有「展开」按钮，点击后出现 models_by_channel 里的模型名", async () => {
+    const tab = buttonByLabel("渠道");
+    expect(tab).toBeDefined();
+    await act(async () => {
+      tab!.click();
+    });
+    const expand = buttonByLabel("展开 ▾");
+    expect(expand, "渠道行应该有「展开 ▾」按钮").toBeDefined();
+    await act(async () => {
+      expand!.click();
+    });
+    expect(container.textContent).toContain("DeepSeek Chat");
+    expect(container.textContent).toContain("DeepSeek Reasoner");
+  });
+
+  it("诊断栏出现「记录」行与「保留天数」，熔断中的账号标出「熔断中」", async () => {
+    const tab = buttonByLabel("诊断");
+    expect(tab).toBeDefined();
+    await act(async () => {
+      tab!.click();
+    });
+    const dts = walk(container).filter((n) => n.nodeType === 1 && n.tagName === "DT");
+    expect(dts.some((n) => n.textContent === "记录"), "诊断栏应有「记录」一行").toBe(true);
+    expect(container.textContent).toContain("保留天数");
+    expect(container.textContent).toContain("熔断中（至");
+  });
+
+  it("构建产物 client.js 里带上了新的写路由调用（先 build 再 test 才有意义）", () => {
+    const source = readFileSync(CLIENT, "utf8");
+    expect(source).toContain("auth/one-click");
+    expect(source).toContain("records/clear");
   });
 });

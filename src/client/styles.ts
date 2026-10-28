@@ -103,12 +103,18 @@ body[data-ds-dark-theme] .dmh-scope, .dmh-scope[data-dmh-dark]{
 .dmh-badge.dmh-free{background:color-mix(in srgb,var(--dmh-green-500) 16%,transparent);color:var(--dmh-success)}
 .dmh-badge.dmh-err{background:color-mix(in srgb,var(--dmh-error) 14%,transparent);color:var(--dmh-error)}
 
-/* ===== 开关 ===== */
-.dmh-sw{width:30px;height:17px;border-radius:9px;background:var(--dmh-border-l4);position:relative;flex:none;cursor:pointer;border:0;padding:0;transition:background .15s}
-.dmh-sw.dmh-on{background:var(--dmh-success)}
-.dmh-sw::after{content:"";position:absolute;top:2px;left:2px;width:13px;height:13px;border-radius:50%;background:#fff;transition:transform .15s;box-shadow:0 1px 2px #0003}
-.dmh-sw.dmh-on::after{transform:translateX(13px)}
-.dmh-sw:disabled{opacity:.45;cursor:not-allowed}
+/* ===== 开关 =====
+ * 任务 10 起开关全部可点，类名 dmh-sw 改为 dmh-switch：
+ * hover 有反馈、checked 是绿色，不再有 disabled 专属灰 —— 忙时靠全局禁用
+ * （opacity 由 .dmh-btn/.dmh-switch 通用规则给），平时不存在"永久禁用"态。 */
+.dmh-switch{width:30px;height:17px;border-radius:9px;background:var(--dmh-border-l4);position:relative;flex:none;cursor:pointer;border:0;padding:0;transition:background .15s}
+.dmh-switch:hover{background:color-mix(in srgb,var(--dmh-label-quaternary) 70%,var(--dmh-border-l4))}
+.dmh-switch:focus-visible{outline:2px solid var(--dmh-accent-text);outline-offset:1px}
+.dmh-switch.dmh-on{background:var(--dmh-success)}
+.dmh-switch.dmh-on:hover{background:color-mix(in srgb,var(--dmh-success) 82%,#000)}
+.dmh-switch::after{content:"";position:absolute;top:2px;left:2px;width:13px;height:13px;border-radius:50%;background:#fff;transition:transform .15s;box-shadow:0 1px 2px #0003}
+.dmh-switch.dmh-on::after{transform:translateX(13px)}
+.dmh-switch:disabled{cursor:wait}
 
 /* ===== 表格 ===== */
 .dmh-table{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums}
@@ -164,6 +170,40 @@ body[data-ds-dark-theme] .dmh-scope, .dmh-scope[data-dmh-dark]{
   padding:24px;background:rgba(0,0,0,.45);
 }
 .dmh-overlay-body{max-height:84vh;overflow:auto;border-radius:10px}
+
+/* ===== 渠道展开的模型列表（任务 10）===== */
+.dmh-models{
+  padding:6px 16px 10px 32px;             /* 相对行再缩进 16px，视觉上属于上一行渠道 */
+  border-bottom:1px solid var(--dmh-border-l1);
+  display:flex;flex-direction:column;gap:3px;background:var(--dmh-bg-layer-3);
+}
+.dmh-models-line{font-size:11px;color:var(--dmh-label-secondary);display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.dmh-models-name{color:var(--dmh-label-primary)}
+.dmh-models-mult{color:var(--dmh-label-tertiary);font-variant-numeric:tabular-nums}
+
+/* ===== 添加账号弹窗的表单 ===== */
+.dmh-sheet-sm{width:520px;max-width:100%}
+.dmh-form{display:flex;flex-direction:column;gap:12px;padding:14px 18px 16px}
+.dmh-form label{display:flex;flex-direction:column;gap:4px;font-size:11px;color:var(--dmh-label-tertiary)}
+.dmh-form textarea,.dmh-form input{
+  font:inherit;font-size:11.5px;padding:7px 9px;border-radius:6px;
+  border:1px solid var(--dmh-border-l3);background:var(--dmh-card-fill);color:var(--dmh-label-primary);
+}
+.dmh-form textarea{
+  font-family:ui-monospace,"Cascadia Mono",Consolas,monospace;
+  min-height:76px;                           /* 约 4 行等宽 */
+  resize:vertical;word-break:break-all;
+}
+.dmh-form textarea:focus,.dmh-form input:focus{outline:2px solid var(--dmh-accent-text);outline-offset:-1px}
+.dmh-form-hint{color:var(--dmh-danger-text)}
+.dmh-form-actions{display:flex;justify-content:flex-end;gap:6px}
+
+/* ===== 一键认证结果区（tabs 上方）===== */
+.dmh-authbox{border-bottom:1px solid var(--dmh-border-l1);background:var(--dmh-bg-layer-3)}
+.dmh-authline{display:flex;align-items:center;gap:8px;padding:7px 16px 0;font-size:11.5px;flex-wrap:wrap}
+.dmh-authline-name{font-weight:600;color:var(--dmh-label-primary)}
+.dmh-authline-detail{font-size:11px;color:var(--dmh-label-tertiary);word-break:break-all}
+.dmh-authline-actions{display:flex;justify-content:flex-end;padding:6px 16px 8px}
 `;
 
 /**

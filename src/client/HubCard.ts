@@ -5,13 +5,15 @@ import {
   fetchDiag,
   fetchRecords,
   fetchSummary,
-  type CatalogEntry,
+  hubApi,
   type DiagData,
+  type OneClickReport,
 } from "./api.js";
-import { formatCount, formatMs, formatTps } from "./format.js";
+import { formatClock, formatCount, formatMs, formatTps } from "./format.js";
 import { RecordsModal } from "./RecordsModal.js";
 import { ensureStyles } from "./styles.js";
-import type { AccountRow, ChannelRow, RequestRow, Summary } from "./types.js";
+import type { AccountRow, CatalogEntry, ChannelRow, RequestRow, Summary } from "./types.js";
+import { AddAccountModal } from "./AddAccountModal.js";
 
 /**
  * 设置卡片 —— **按原型 `docs/prototype/ui-prototype.html` 视图 ① 实现**。
@@ -19,10 +21,11 @@ import type { AccountRow, ChannelRow, RequestRow, Summary } from "./types.js";
  * 结构与原型逐节对齐（card-head / tabs / 四个 panel），类名走 `dmh-` 前缀，
  * 样式由 `styles.ts` 从原型整段搬来。这样"做出来的"与"设计稿"能一眼比对。
  *
- * 一处刻意偏差：原型里的「一键认证」「+ 添加账号」「测试」「删除」**没有后端**，
- * 因为凭据是只读复用、账号增删要凭据生命周期管理（P1 还没做）。
- * 它们照原样渲染以保持视觉一致，但 `disabled` 且 `title` 写明原因 ——
- * 渲染一个点了没反应的按钮比不渲染更糟。
+ * 任务 10 之后，原型里的全部控件都已接到写路由（`src/routes/write.ts` 九条
+ * POST）：一键认证、渠道/账号开关、测试、设为当前、删除、添加账号、记录管理。
+ * 行级 busy 用单个 `busyId` 键位标记：**同一时刻只放行一个写操作**——
+ * 不是做并发排队，而是让「按钮 disabled」成为对用户可见的串行承诺，
+ * 也顺便挡住「操作进行中又点刷新」这类 load() 与写并发交错。
  */
 
 const h = React.createElement;
@@ -36,7 +39,12 @@ const TABS: { id: Tab; label: string }[] = [
   { id: "diag", label: "诊断" },
 ];
 
-const NOT_WIRED = "后端接口还没做，先占位";
+/** 单账号测试结果的行内展示（meta 末尾追加），失败原文截 24 字防刷屏。 */
+interface TestResult {
+  ok: boolean;
+  detail: string;
+  ms: number;
+}
 
 function dot(state: "ok" | "err" | "warn" | "off"): React.ReactElement {
   return h("span", { className: `dmh-dot dmh-${state}` });
@@ -78,6 +86,13 @@ export function HubCard(): React.ReactElement {
   const [modalOpen, setModalOpen] = React.useState(false);
   const [error, setError] = React.useState<string | undefined>(undefined);
   const [loading, setLoading] = React.useState(true);
+  // ── 任务 10 ──
+  const [busyId, setBusyId] = React.useState<string | undefined>(undefined);
+  const [expandedChannel, setExpandedChannel] = React.useState<string | undefined>(undefined);
+  const [authReport, setAuthReport] = React.useState<OneClickReport | undefined>(undefined);
+  const [addModalFor, setAddModalFor] = React.useState<string | undefined>(undefined);
+  const [testResults, setTestResults] = React.useState<Map<string, TestResult>>(new Map());
+  const [modelsByChannel, setModelsByChannel] = React.useState<Record<string, CatalogEntry[]>>({});
 
   const load = React.useCallback(async () => {
     try {
@@ -96,6 +111,8 @@ export function HubCard(): React.ReactElement {
       setAccounts(channelData.accounts);
       setRecent(records.requests);
       setCatalog(catalogData.models);
+      // 旧 host 不带 models_by_channel 键：当 `{}` 消费，展开行显示「目录为空」而不是崩
+      setModelsByChannel(channelData.models_by_channel ?? {});
       setDiag(diagData);
       setError(undefined);
     } catch (caught) {
@@ -108,6 +125,30 @@ export function HubCard(): React.ReactElement {
   React.useEffect(() => {
     void load();
   }, [load]);
+
+  /**
+   * 写操作包装：设 busyId → 执行 → 成功后 load() 刷新（开关/删除/认证都会改
+   * 数据面）→ 失败进 errbox。finally 保证 busy 必被清掉，按钮不会卡死。
+   * fn 返回值不关心（写路由多数只回 {ok:true}），所以收 `Promise<unknown>`。
+   */
+  const run = (key: string, fn: () => Promise<unknown>) => async () => {
+    setBusyId(key);
+    setError(undefined);
+    try {
+      await fn();
+      await load();
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught));
+    } finally {
+      setBusyId(undefined);
+    }
+  };
+
+  // 一键认证期间按钮文案要变「认证中…」。busyId 里已经有这个信息，不再单开一个布尔
+  // （两份状态必然漂移）；「authBusy」就是 busyId === "auth"。
+  const authBusy = busyId === "auth";
+  // 任一写操作进行中就禁用全部写按钮：单 busyId 的串行承诺（见组件注释）。
+  const someBusy = busyId !== undefined;
 
   const accountsByChannel = new Map<string, AccountRow[]>();
   for (const account of accounts) {
@@ -129,11 +170,14 @@ export function HubCard(): React.ReactElement {
           "div",
           { className: "dmh-row dmh-group", key: `g-${channel.id}` },
           h("div", { className: "dmh-row-main" }, h("span", { className: "dmh-row-meta" }, channel.display_name)),
-          h("button", { className: "dmh-btn dmh-sm", disabled: true, title: NOT_WIRED }, "+ 添加账号"),
+          h("button", { className: "dmh-btn dmh-sm", disabled: someBusy, onClick: () => setAddModalFor(channel.id) }, "+ 添加账号"),
         ),
       );
       for (const account of list) {
-        const state = account.has_credential === 1 ? (account.enabled === 1 ? "ok" : "warn") : "off";
+        // 熔断优先：冷却窗口内的账号就算 enabled 也不可用，状态点直接转 err
+        const cooling = account.cooldown_until !== null && account.cooldown_until > Date.now();
+        const state = cooling ? "err" : account.has_credential === 1 ? (account.enabled === 1 ? "ok" : "warn") : "off";
+        const tested = testResults.get(account.id);
         blocks.push(
           h(
             "div",
@@ -158,23 +202,55 @@ export function HubCard(): React.ReactElement {
                       ? "国内版"
                       : "国际版",
                   account.has_credential === 1 ? "有凭据" : "缺凭据",
+                  cooling ? `熔断中（至 ${formatClock(account.cooldown_until!)}）` : undefined,
                   account.last_error === null ? undefined : `上次失败：${account.last_error.slice(0, 24)}`,
                   account.last_ok_at === null
                     ? undefined
                     : `上次成功 ${new Date(account.last_ok_at).toLocaleTimeString("zh-CN")}`,
+                  tested === undefined
+                    ? undefined
+                    : tested.ok
+                      ? `✓ ${formatMs(tested.ms)}`
+                      : `✗ ${tested.detail.slice(0, 24)}`,
                 ]
                   .filter((x): x is string => typeof x === "string")
                   .join(" · "),
               ),
             ),
             h("button", {
-              className: `dmh-sw${account.enabled === 1 ? " dmh-on" : ""}`,
-              disabled: true,
-              title: NOT_WIRED,
+              className: `dmh-switch${account.enabled === 1 ? " dmh-on" : ""}`,
+              role: "switch",
+              "aria-checked": account.enabled === 1,
               "aria-label": account.enabled === 1 ? "已启用" : "已禁用",
+              disabled: someBusy,
+              onClick: run(`sw:${account.id}`, () => hubApi.toggleAccount(account.id, account.enabled !== 1)),
             }),
-            h("button", { className: "dmh-btn dmh-sm", disabled: true, title: NOT_WIRED }, "测试"),
-            h("button", { className: "dmh-btn dmh-sm dmh-danger", disabled: true, title: NOT_WIRED }, "删除"),
+            h("button", {
+              className: "dmh-btn dmh-sm",
+              disabled: someBusy,
+              onClick: run(`test:${account.id}`, async () => {
+                const result = await hubApi.testAccount(account.id);
+                // 换新 Map：React 以引用比对 state，原地 set 不会触发重渲染
+                setTestResults((prev) => new Map(prev).set(account.id, result));
+              }),
+            }, "测试"),
+            // 「设为当前」只给非当前账号渲染——当前账号没有可切换的目标状态
+            account.is_current === 1
+              ? null
+              : h("button", {
+                  className: "dmh-btn dmh-sm",
+                  disabled: someBusy,
+                  onClick: run(`cur:${account.id}`, () => hubApi.makeCurrent(account.id)),
+                }, "设为当前"),
+            h("button", {
+              className: "dmh-btn dmh-sm dmh-danger",
+              disabled: someBusy,
+              onClick: () => {
+                // 确认放在 run 外面：取消时连 load() 都不该发生
+                if (!window.confirm(`删除账号 ${account.display_name}？凭据文件不受影响`)) return;
+                void run(`del:${account.id}`, () => hubApi.deleteAccount(account.id))();
+              },
+            }, "删除"),
           ),
         );
       }
@@ -184,8 +260,9 @@ export function HubCard(): React.ReactElement {
 
   const renderChannels = (): React.ReactNode => {
     if (channels.length === 0) return h("div", { className: "dmh-note" }, "还没有渠道。");
-    return [
-      ...channels.map((channel) =>
+    const rows: React.ReactNode[] = [];
+    for (const channel of channels) {
+      rows.push(
         h(
           "div",
           { className: "dmh-row", key: channel.id },
@@ -202,19 +279,51 @@ export function HubCard(): React.ReactElement {
             ),
           ),
           h("button", {
-            className: `dmh-sw${channel.enabled === 1 ? " dmh-on" : ""}`,
-            disabled: true,
-            title: NOT_WIRED,
+            className: "dmh-btn dmh-sm",
+            onClick: () => setExpandedChannel(expandedChannel === channel.id ? undefined : channel.id),
+          }, expandedChannel === channel.id ? "收起 ▴" : "展开 ▾"),
+          h("button", {
+            className: `dmh-switch${channel.enabled === 1 ? " dmh-on" : ""}`,
+            role: "switch",
+            "aria-checked": channel.enabled === 1,
             "aria-label": channel.enabled === 1 ? "已启用" : "已禁用",
+            disabled: someBusy,
+            onClick: run(`channel:${channel.id}`, () => hubApi.toggleChannel(channel.id, channel.enabled !== 1)),
           }),
         ),
-      ),
+      );
+      if (expandedChannel === channel.id) {
+        const entries = modelsByChannel[channel.id] ?? [];
+        rows.push(
+          h(
+            "div",
+            { className: "dmh-models", key: `models-${channel.id}` },
+            entries.length === 0
+              ? h("div", { className: "dmh-models-line" }, "该渠道目录为空（shim 还没拉到模型）")
+              : entries.map((entry) =>
+                  h(
+                    "div",
+                    { className: "dmh-models-line", key: entry.id },
+                    h("span", { className: "dmh-models-name" }, entry.name),
+                    entry.creditMultiplier === undefined
+                      ? null
+                      : h("span", { className: "dmh-models-mult" }, `x${entry.creditMultiplier}`),
+                    entry.promotionBadge === undefined ? null : h("span", { className: "dmh-badge" }, entry.promotionBadge),
+                    entry.tierBadge === undefined ? null : h("span", { className: "dmh-badge" }, entry.tierBadge),
+                  ),
+                ),
+          ),
+        );
+      }
+    }
+    rows.push(
       h(
         "div",
         { className: "dmh-note", key: "note" },
         "渠道开关关闭后，该渠道的模型从模型选择器里彻底消失（不是藏起来），凭据保留，随时可以重新打开。",
       ),
-    ];
+    );
+    return rows;
   };
 
   const renderRecords = (): React.ReactNode => [
@@ -307,7 +416,40 @@ export function HubCard(): React.ReactElement {
             ? "（无）"
             : `${new Date(diag.lastError.at).toLocaleString("zh-CN")} · ${diag.lastError.model}`,
         ],
+        // 记录开关在宿主插件设置里，这里只读展示——关了就写明去哪改
+        ["记录", diag?.recordEnabled === false ? "关（宿主插件设置里改）" : "开"],
       ].flatMap(([k, v]) => kvPair(k as string, v as string)),
+    ),
+    h(
+      "div",
+      { className: "dmh-row", key: "mgmt" },
+      h(
+        "div",
+        { className: "dmh-row-main" },
+        h("div", { className: "dmh-row-name" }, "记录管理"),
+        h(
+          "div",
+          { className: "dmh-row-meta" },
+          `保留天数 ${diag?.retentionDays ?? "—"} · 明细 ${
+            diag === undefined ? "—" : `${formatCount(diag.recordCount)} 条`
+          }`,
+        ),
+      ),
+      h("button", {
+        className: "dmh-btn dmh-sm",
+        disabled: someBusy,
+        onClick: run("prune", () => hubApi.pruneRecords()),
+      }, "立即清理"),
+      h("button", {
+        className: "dmh-btn dmh-sm dmh-danger",
+        disabled: someBusy,
+        onClick: () => {
+          // 清空是全表删除且不可恢复：两连问——先确认意图，再换一句话确认
+          if (!window.confirm("确定清空全部记录？此操作不可恢复")) return;
+          if (!window.confirm("再次确认：删除所有明细与聚合")) return;
+          void run("clear", () => hubApi.clearRecords())();
+        },
+      }, "清空全部"),
     ),
     h(
       "div",
@@ -320,6 +462,36 @@ export function HubCard(): React.ReactElement {
       ? h("div", { className: "dmh-note", key: "noerr" }, "目前没有失败记录。")
       : h("div", { className: "dmh-errbox", key: "err" }, `HTTP ${diag.lastError.status ?? "—"} · ${diag.lastError.error}`),
   ];
+
+  /** 一键认证的结果区（tabs 上方）：每渠道一行，带关闭按钮。 */
+  const renderAuthReport = (): React.ReactNode => {
+    if (authReport === undefined) return null;
+    return h(
+      "div",
+      { className: "dmh-authbox", key: "authbox" },
+      authReport.channels.map((line) => {
+        const displayName = channels.find((c) => c.id === line.id)?.display_name ?? line.id;
+        const missed = line.sources.filter((s) => s.status !== "ok").map((s) => `${s.source}：${s.detail}`);
+        return h(
+          "div",
+          { className: "dmh-authline", key: line.id },
+          h("span", { className: "dmh-authline-name" }, displayName),
+          h("span", { className: `dmh-badge${line.status === "ok" ? " dmh-free" : line.status === "missing" ? " dmh-err" : ""}` }, line.status),
+          h(
+            "span",
+            { className: "dmh-authline-detail" },
+            `接管 ${line.accountsAdded} 个账号`,
+            missed.length === 0 ? null : ` · ${missed.join(" · ")}`,
+          ),
+        );
+      }),
+      h(
+        "div",
+        { className: "dmh-authline-actions", key: "actions" },
+        h("button", { className: "dmh-btn dmh-sm", onClick: () => setAuthReport(undefined), "aria-label": "关闭" }, "关闭"),
+      ),
+    );
+  };
 
   return h(
     React.Fragment,
@@ -346,6 +518,7 @@ export function HubCard(): React.ReactElement {
               "button",
               {
                 className: "dmh-btn",
+                disabled: someBusy,
                 onClick: () => {
                   setLoading(true);
                   void load();
@@ -353,9 +526,18 @@ export function HubCard(): React.ReactElement {
               },
               "刷新",
             ),
-            h("button", { className: "dmh-btn dmh-primary", disabled: true, title: NOT_WIRED }, "一键认证"),
+            h(
+              "button",
+              {
+                className: "dmh-btn dmh-primary",
+                disabled: someBusy,
+                onClick: run("auth", async () => setAuthReport(await hubApi.oneClickAuth())),
+              },
+              authBusy ? "认证中…" : "一键认证",
+            ),
           ),
         ),
+        renderAuthReport(),
         h(
           "div",
           { className: "dmh-tabs" },
@@ -374,7 +556,7 @@ export function HubCard(): React.ReactElement {
           ),
         ),
         error !== undefined
-          ? h("div", { className: "dmh-errbox" }, `读取失败：${error}`)
+          ? h("div", { className: "dmh-errbox" }, error)
           : loading
             ? h("div", { className: "dmh-note" }, "读取中…")
             : [
@@ -386,5 +568,17 @@ export function HubCard(): React.ReactElement {
       ),
     ),
     modalOpen ? h(RecordsModal, { onClose: () => setModalOpen(false) }) : null,
+    addModalFor !== undefined
+      ? h(AddAccountModal, {
+          channelId: addModalFor,
+          kind: channels.find((c) => c.id === addModalFor)?.kind === "qoder" ? "qoder" : "workbuddy",
+          onClose: () => setAddModalFor(undefined),
+          onDone: () => {
+            // 简报口径：成功 = 父组件刷新数据 + 关弹窗
+            setAddModalFor(undefined);
+            void load();
+          },
+        })
+      : null,
   );
 }

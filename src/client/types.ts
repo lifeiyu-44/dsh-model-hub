@@ -55,10 +55,23 @@ export interface AccountRow {
   enabled: number;
   is_current: number;
   consecutive_failures: number;
+  /** 熔断冷却的截止时刻（毫秒）；null = 未熔断。行 UI 据此把状态点转 err。 */
+  cooldown_until: number | null;
   last_error: string | null;
   last_ok_at: number | null;
   created_at: number;
   has_credential: number;
+}
+
+/** 目录条目：模型 id、展示名、倍率与徽标。/catalog 与 /channels 的 models_by_channel 都用它。 */
+export interface CatalogEntry {
+  id: string;
+  name: string;
+  creditMultiplier?: number;
+  promotionBadge?: string;
+  tierBadge?: string;
+  promotionColor?: string;
+  tierColor?: string;
 }
 
 export interface RecordsResponse {
@@ -69,6 +82,11 @@ export interface RecordsResponse {
 export interface ChannelsResponse {
   channels: ChannelRow[];
   accounts: AccountRow[];
+  /**
+   * 渠道 → 该渠道的模型目录。渠道行「展开」用它（任务 9 裁定 2）；
+   * 旧 host 不带这个键时按 `{}` 消费（展开行显示「目录不可用」）。
+   */
+  models_by_channel: Record<string, CatalogEntry[]>;
 }
 
 /** 数据路由前缀，与 `src/routes/data.ts` 的 `DATA_PREFIX` 必须一致。 */

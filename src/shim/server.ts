@@ -2,7 +2,8 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import { TurnTimer, type NormalizedUsage, type TurnMetrics } from "./recorder.js";
 import { parseSseLine } from "./upstream.js";
-import { ensureSystemHead } from "./prepare.js";
+import { applyDefaultReasoning, ensureSystemHead } from "./prepare.js";
+import { recordRejected } from "./diagnostics.js";
 
 export interface ShimDeps {
   /** 上游地址与请求头，由渠道后端提供。 */
@@ -129,7 +130,7 @@ export async function startShim(deps: ShimDeps): Promise<ShimHandle> {
 
       // 国际网关拒收首条不是 system 的请求（400 / 11128）。补头必须在
       // shim 这一层做 —— 这是最后一个能看到并改写请求体的地方。
-      const body = ensureSystemHead(raw);
+      const body = applyDefaultReasoning(ensureSystemHead(raw));
 
       const { baseUrl, headers } = await deps.prepare();
 
@@ -152,8 +153,21 @@ export async function startShim(deps: ShimDeps): Promise<ShimHandle> {
 
       if (!upstream.ok) {
         error = `upstream HTTP ${upstream.status}`;
+        const upstreamText = await upstream.text();
+        // 把「我们发了什么 + 上游回了什么」落一份快照。
+        // 上游的 400 通常只给一句笼统的话（WorkBuddy 的 11128 就是），
+        // 不落盘就只能靠猜是哪个字段被拒。
+        void recordRejected({
+          at: Date.now(),
+          url: built.url,
+          status: upstream.status,
+          responseBody: upstreamText,
+          requestBody: typeof built.body === "string" ? built.body : Buffer.from(built.body as Uint8Array).toString("utf8"),
+          headers: built.headers,
+          model,
+        });
         res.writeHead(upstream.status, { "content-type": "application/json" });
-        res.end(await upstream.text());
+        res.end(upstreamText);
         return;
       }
 
@@ -200,12 +214,45 @@ export async function startShim(deps: ShimDeps): Promise<ShimHandle> {
           // 这样记录表里的 token/速度与用户看到的完全一致。
           const translated = decodeLine(line);
           if (translated !== null) {
+            // **业务错误藏在 200 的流里**：Qoder 上游永远回 HTTP 200，
+            // 真正的失败是流里的 error chunk（实测 429 / All backends failed）。
+            // 之前只看 HTTP 状态码，于是把它记成「200 + 0 token + 无错误」——
+            // 面板上看起来是一次成功但没有任何用量，用户因此看不到 token。
+            const message = errorMessageOf(translated);
+            if (message !== undefined && error === undefined) {
+              error = message;
+              // 记录用 502：这不是成功的 2xx，面板与统计要能区分出来。
+              // 但**不能**改已发出的响应头（那是 200），客户端侧靠 error chunk 自己判。
+              statusCode = 502;
+            }
             res.write(`${translated}\n\n`);
             const parsed = parseSseLine(translated);
             if (parsed.text !== undefined) timer.onDelta(parsed.text, Date.now());
             if (parsed.usage !== undefined) usage = parsed.usage;
           }
           nl = buffer.indexOf("\n");
+        }
+      }
+      // 收尾：最后一段没有换行结尾的残留行也要处理，否则最后一条 chunk
+      // （往往正是 usage）会被静默丢掉。
+      if (buffer.trim() !== "") {
+        if (decodeLine === undefined) {
+          const parsed = parseSseLine(buffer);
+          if (parsed.text !== undefined) timer.onDelta(parsed.text, Date.now());
+          if (parsed.usage !== undefined) usage = parsed.usage;
+        } else {
+          const translated = decodeLine(buffer);
+          if (translated !== null) {
+            const message = errorMessageOf(translated);
+            if (message !== undefined && error === undefined) {
+              error = message;
+              statusCode = 502;
+            }
+            res.write(`${translated}\n\n`);
+            const parsed = parseSseLine(translated);
+            if (parsed.text !== undefined) timer.onDelta(parsed.text, Date.now());
+            if (parsed.usage !== undefined) usage = parsed.usage;
+          }
         }
       }
       res.end();
@@ -245,4 +292,25 @@ async function readBody(req: IncomingMessage): Promise<string> {
   const chunks: Buffer[] = [];
   for await (const chunk of req) chunks.push(Buffer.from(chunk as Buffer));
   return Buffer.concat(chunks).toString("utf8");
+}
+
+/**
+ * 从一行已翻好的 SSE 里取出业务错误文案。
+ *
+ * 上游把失败塞在 `data: {"error":{...}}` 里而不是 HTTP 状态码里，
+ * 所以必须逐行看内容，否则「失败的请求」会被记成「成功但没有用量」。
+ */
+function errorMessageOf(line: string): string | undefined {
+  if (!line.startsWith("data:")) return undefined;
+  const payload = line.slice(5).trim();
+  if (payload === "" || payload === "[DONE]") return undefined;
+  try {
+    const doc = JSON.parse(payload) as Record<string, unknown>;
+    const error = doc["error"];
+    if (typeof error !== "object" || error === null) return undefined;
+    const message = (error as Record<string, unknown>)["message"];
+    return typeof message === "string" && message !== "" ? message.slice(0, 300) : "上游返回了错误";
+  } catch {
+    return undefined;
+  }
 }

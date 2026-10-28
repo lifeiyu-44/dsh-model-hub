@@ -23,4 +23,12 @@ export interface ChannelModel {
   promotionColor?: string;
   /** 等级标记的颜色。 */
   tierColor?: string;
+  /**
+   * 上游是否支持思考档位（reasoning effort）。
+   *
+   * 必须如实声明：声明 `false` 时宿主不显示「思考强度」控件；
+   * 声明 `true` 但上游不认，会被 400 拒。Qoder 目录里有 `is_reasoning`，
+   * 之前被丢掉了，所以用 Qoder 模型时没有思考强度可选。
+   */
+  reasoning?: boolean;
 }

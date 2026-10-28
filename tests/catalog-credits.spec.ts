@@ -29,3 +29,33 @@ describe("parseCredits", () => {
     expect(parseCredits(null)).toBe(0);
   });
 });
+
+/**
+ * 上下文窗口与思考档位的映射。
+ *
+ * 两处都是用户实测报上来的显示错误：
+ * - 「上下文已用 336K / 180K 100%」：拿 max_input_tokens 当窗口上限，而上游
+ *   另有 maxAllowedSize（更大）。
+ * - 「没有思考强度可选」：一律声明 reasoning: false，而上游其实接受参数。
+ */
+describe("toChannelModel 的窗口与思考档位", () => {
+  const base = { id: "m", name: "M", credits: "", supportsImages: false };
+
+  it("contextWindow 取 maxInputTokens 与 maxAllowedSize 的较大者", async () => {
+    const { toChannelModel } = await import("../src/channels/workbuddy/catalog.js");
+    const model = toChannelModel({ ...base, maxInputTokens: 176000, maxAllowedSize: 200000, maxOutputTokens: 24000 });
+    expect(model!.contextWindow).toBe(200000);
+  });
+
+  it("只有 maxInputTokens 时用它", async () => {
+    const { toChannelModel } = await import("../src/channels/workbuddy/catalog.js");
+    const model = toChannelModel({ ...base, maxInputTokens: 128000, maxOutputTokens: 8000 });
+    expect(model!.contextWindow).toBe(128000);
+  });
+
+  it("声明 reasoning: true（上游接受 reasoning_effort / enable_thinking，实测 200）", async () => {
+    const { toChannelModel } = await import("../src/channels/workbuddy/catalog.js");
+    const model = toChannelModel({ ...base, maxInputTokens: 100000 });
+    expect(model!.reasoning).toBe(true);
+  });
+});

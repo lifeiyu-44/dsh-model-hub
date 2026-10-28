@@ -68,31 +68,67 @@ export async function fetchCatalog(
   const tierColorOf = badgeColorIndex(data["modelTiers"]);
 
   return models.flatMap((entry) => {
-    const id = typeof entry["id"] === "string" ? entry["id"] : "";
-    if (id === "") return [];
-    const maxInput = typeof entry["maxInputTokens"] === "number" ? entry["maxInputTokens"] : 200_000;
-    const maxOutput = typeof entry["maxOutputTokens"] === "number" ? entry["maxOutputTokens"] : 32_000;
-    const promotion = promotionOf(id);
-    const tier = tierOf(id);
-    const promotionColor = promotionColorOf(id);
-    const tierColor = tierColorOf(id);
-    return [{
-      id,
-      name: typeof entry["name"] === "string" ? entry["name"] : id,
-      // 上游只给 maxInputTokens；把它当作上下文窗口的上限向 DSH 宣称。
-      contextWindow: maxInput,
-      maxTokens: maxOutput,
-      // `credits` 是字符串倍率，空串 = 免费。数字解析失败按 0 处理（免费），
-      // 因为拿不到价格时按「免费」展示比按「贵」展示更少误导 —— 实际花费
-      // 仍由上游账单决定，这个字段只用于面板排序与提示。
-      creditMultiplier: parseCredits(entry["credits"]),
-      supportsImages: entry["supportsImages"] === true,
-      ...(promotion === undefined ? {} : { promotionBadge: promotion }),
-      ...(tier === undefined ? {} : { tierBadge: tier }),
-      ...(promotionColor === undefined ? {} : { promotionColor }),
-      ...(tierColor === undefined ? {} : { tierColor }),
-    }];
+    const model = toChannelModel(entry, { promotionOf, tierOf, promotionColorOf, tierColorOf });
+    return model === undefined ? [] : [model];
   });
+}
+
+/**
+ * 上游条目 → 渠道模型。
+ *
+ * 抽成独立函数是为了能单测：这里踩过两个显示错误
+ * （上下文窗口取值、思考档位声明），都得靠测试钉住。
+ *
+ * `badges` 是可选的活动/等级标记查表；不传就只有基础字段。
+ */
+export function toChannelModel(
+  entry: Record<string, unknown>,
+  badges: {
+    promotionOf?: (id: string) => string | undefined;
+    tierOf?: (id: string) => string | undefined;
+    promotionColorOf?: (id: string) => string | undefined;
+    tierColorOf?: (id: string) => string | undefined;
+  } = {},
+): ChannelModel | undefined {
+  const id = typeof entry["id"] === "string" ? entry["id"] : "";
+  if (id === "") return undefined;
+
+  const maxInput = typeof entry["maxInputTokens"] === "number" ? entry["maxInputTokens"] : 200_000;
+  const maxOutput = typeof entry["maxOutputTokens"] === "number" ? entry["maxOutputTokens"] : 32_000;
+  // `maxAllowedSize` 是上游给的**窗口上限**（实测 default-model: 200000），
+  // 而 `maxInputTokens`（176000）是「单次输入建议值」。
+  // 拿后者当 contextWindow 会让宿主提前压缩，并把用量百分比显示得偏高
+  // （用户实测报过「上下文已用 336K / 180K 100%」）。
+  const maxAllowed = typeof entry["maxAllowedSize"] === "number" ? entry["maxAllowedSize"] : 0;
+  const contextWindow = Math.max(maxInput, maxAllowed);
+
+  const promotion = badges.promotionOf?.(id);
+  const tier = badges.tierOf?.(id);
+  const promotionColor = badges.promotionColorOf?.(id);
+  const tierColor = badges.tierColorOf?.(id);
+
+  return {
+    id,
+    name: typeof entry["name"] === "string" ? entry["name"] : id,
+    contextWindow,
+    maxTokens: maxOutput,
+    // `credits` 是字符串倍率，空串 = 免费。数字解析失败按 0 处理（免费），
+    // 因为拿不到价格时按「免费」展示比按「贵」展示更少误导 —— 实际花费
+    // 仍由上游账单决定，这个字段只用于面板排序与提示。
+    creditMultiplier: parseCredits(entry["credits"]),
+    supportsImages: entry["supportsImages"] === true,
+    // 思考档位：WorkBuddy 的 `/v3/config` **不提供**逐模型的 reasoning 标记
+    // （实测目录里只有 credits/description/limits/supportsToolCall 等字段）。
+    // 但上游**确实接受**这两个参数（实测 2026-10-28，hy3 带
+    // `reasoning_effort: "high"` 与 `enable_thinking: true` 都返回 200），
+    // 所以统一声明为支持 —— 否则宿主不给「思考强度」控件，用户没得选。
+    // 对不支持的模型，上游会忽略这个参数，不会报错。
+    reasoning: true,
+    ...(promotion === undefined ? {} : { promotionBadge: promotion }),
+    ...(tier === undefined ? {} : { tierBadge: tier }),
+    ...(promotionColor === undefined ? {} : { promotionColor }),
+    ...(tierColor === undefined ? {} : { tierColor }),
+  };
 }
 
 /**

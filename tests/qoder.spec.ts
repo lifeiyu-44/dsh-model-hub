@@ -179,7 +179,8 @@ describe("toChannelModel —— 上游字段映射", () => {
   it("缺上下文窗口时用保守默认，不虚报", () => {
     const model = toChannelModel({ key: "m" })!;
     expect(model.contextWindow).toBe(128_000);
-    expect(model.maxTokens).toBeLessThanOrEqual(8_192);
+    // 开了思考后 max_tokens 要留够正文，32K 而不是 8K
+    expect(model.maxTokens).toBeGreaterThanOrEqual(32_000);
   });
 
   it("maxTokens 不超过上下文窗口", () => {
@@ -609,4 +610,95 @@ describe("live: 断链历史不再 400", () => {
       shim.close();
     }
   }, 120_000);
+});
+describe("sanitizeMessages —— 角色归一", () => {
+  it("developer 改写成 system（Qoder 不认 developer）", async () => {
+    const { sanitizeMessages } = await import("../src/channels/qoder/chat.js");
+    const out = sanitizeMessages([
+      { role: "developer", content: "系统级指令" },
+      { role: "user", content: "hi" },
+    ]);
+    expect(out[0]!.role).toBe("system");
+    expect(out[0]!.content).toBe("系统级指令");
+  });
+
+  it("system / user / assistant 原样保留", async () => {
+    const { sanitizeMessages } = await import("../src/channels/qoder/chat.js");
+    const input = [
+      { role: "system", content: "s" },
+      { role: "user", content: "u" },
+      { role: "assistant", content: "a" },
+    ];
+    expect(sanitizeMessages(input).map((m) => m.role)).toEqual(["system", "user", "assistant"]);
+  });
+
+  it("function 角色改写成 tool（旧 OpenAI 形状兼容）", async () => {
+    const { sanitizeMessages } = await import("../src/channels/qoder/chat.js");
+    const out = sanitizeMessages([
+      { role: "user", content: "u" },
+      { role: "assistant", content: "", tool_calls: [{ id: "a1", type: "function", function: { name: "f", arguments: "{}" } }] },
+      { role: "function", name: "f", tool_call_id: "a1", content: "ok" },
+    ]);
+    expect(out.some((m) => m.role === "function")).toBe(false);
+  });
+});
+describe("contextWindowOf —— 用真实档位，不用 max_input_tokens", () => {
+  it("多档位时取最大值（qfmodel 实测有 1M/400K/200K）", async () => {
+    const { contextWindowOf } = await import("../src/channels/qoder/catalog.js");
+    expect(contextWindowOf({
+      key: "qfmodel",
+      max_input_tokens: 180000,
+      context_config: { "1M": { token_count: 1000000 }, "200K": { token_count: 200000, is_default: true }, "400K": { token_count: 400000 } },
+    })).toBe(1_000_000);
+  });
+
+  it("没有 context_config 时退回 max_input_tokens", async () => {
+    const { contextWindowOf } = await import("../src/channels/qoder/catalog.js");
+    expect(contextWindowOf({ key: "x", max_input_tokens: 96000 })).toBe(96000);
+  });
+
+  it("两者都没有时用保守默认", async () => {
+    const { contextWindowOf } = await import("../src/channels/qoder/catalog.js");
+    expect(contextWindowOf({ key: "x" })).toBe(128_000);
+  });
+
+  it("脏 context_config 不抛错", async () => {
+    const { contextWindowOf } = await import("../src/channels/qoder/catalog.js");
+    expect(contextWindowOf({ key: "x", context_config: "bad" })).toBe(128_000);
+    expect(contextWindowOf({ key: "x", context_config: { a: null, b: "x" } })).toBe(128_000);
+  });
+
+  it("toChannelModel 用上真实窗口（回归：曾显示 336K/180K）", async () => {
+    const { toChannelModel } = await import("../src/channels/qoder/catalog.js");
+    const model = toChannelModel({
+      key: "qfmodel",
+      display_name: "Qwen3.8-Flash",
+      max_input_tokens: 180000,
+      context_config: { "1M": { token_count: 1000000 }, "200K": { token_count: 200000, is_default: true } },
+      price_factor: 0,
+    })!;
+    expect(model.contextWindow).toBe(1_000_000);
+  });
+});
+describe("Qoder 思考开关与档位对齐", () => {
+  it("minimal 档关闭思考（最低档最省）", async () => {
+    const { buildQoderChatBody } = await import("../src/channels/qoder/chat.js");
+    const body = buildQoderChatBody({ reasoning_effort: "minimal" }, "auto");
+    expect((body.parameters as Record<string, unknown>).enable_thinking).toBe(false);
+    expect((body.parameters as Record<string, unknown>).reasoning_effort).toBeUndefined();
+  });
+
+  it("off 档也关闭思考", async () => {
+    const { buildQoderChatBody } = await import("../src/channels/qoder/chat.js");
+    const body = buildQoderChatBody({ reasoning_effort: "off" }, "auto");
+    expect((body.parameters as Record<string, unknown>).enable_thinking).toBe(false);
+  });
+
+  it("medium / high 档开启思考", async () => {
+    const { buildQoderChatBody } = await import("../src/channels/qoder/chat.js");
+    for (const level of ["medium", "high"]) {
+      const body = buildQoderChatBody({ reasoning_effort: level }, "auto");
+      expect((body.parameters as Record<string, unknown>).enable_thinking).toBe(true);
+    }
+  });
 });

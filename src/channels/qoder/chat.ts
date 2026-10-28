@@ -134,9 +134,16 @@ export function sanitizeMessages(messages: unknown): Record<string, unknown>[] {
       continue;
     }
 
-    // user / system / 其它：跨轮，重置声明状态
+    // 其余的 role 一律重置声明状态（跨轮了）。
+    //
+    // `developer` 必须改写成 `system`：DSH 用的是较新的 OpenAI 角色划分，
+    // 而 Qoder 只接受 system/assistant/user/tool/function ——
+    // 实测报错 `developer is not one of ['system','assistant','user','tool','function']`。
+    // 语义上 developer 就是系统级指令，改写成 system 不会丢信息。
     declared = new Set();
-    out.push(message);
+    const normalizedRole =
+      role === "developer" ? "system" : role === "function" ? "tool" : role;
+    out.push(normalizedRole === role ? message : { ...message, role: normalizedRole });
   }
 
   return out;
@@ -154,7 +161,15 @@ export function buildQoderChatBody(openaiBody: Record<string, unknown>, modelKey
   //   message with 'tool_calls'）
   const messages = sanitizeMessages(openaiBody["messages"]);
   const promptText = promptTextOf(messages);
-  const isReasoning = openaiBody["reasoning_effort"] !== undefined || openaiBody["enable_thinking"] === true;
+  // 思考开关的口径要和宿主的档位对齐：
+  //   minimal / off  → 关思考（最低档就该是最省）
+  //   其它档位       → 开思考
+  // shim 会补一个默认 `reasoning_effort: "minimal"`，所以「没提档位」实际
+  // 也会走到这里 —— 用户要的默认最低档就落在这个判断上。
+  const effort = openaiBody["reasoning_effort"];
+  const isReasoning =
+    openaiBody["enable_thinking"] === true ||
+    (typeof effort === "string" && effort !== "off" && effort !== "minimal");
 
   const parameters: Record<string, unknown> = { enable_thinking: isReasoning };
   const maxTokens = openaiBody["max_tokens"] ?? openaiBody["max_completion_tokens"];

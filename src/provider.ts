@@ -28,6 +28,11 @@ export interface HubModel {
   promotionBadge?: string;
   /** 等级标记文案（如 `Pro Only`）。 */
   tierBadge?: string;
+  /**
+   * 上游是否支持思考档位。如实声明才会出现「思考强度」控件；
+   * 声明 true 但上游不认则会被 400 拒。
+   */
+  reasoning?: boolean;
 }
 
 /**
@@ -127,8 +132,9 @@ export function buildProviderProfile(input: BuildProviderInput): Record<string, 
     cost: NO_COST,
     contextWindow: m.contextWindow,
     maxTokens: m.maxTokens,
-    // 目录里没有思考档位信息，就不宣称任何档位 —— 宣称了反而会被上游拒。
-    reasoning: false,
+    // 思考档位如实按渠道目录声明：Qoder 目录里有 is_reasoning，
+    // 之前一律写 false，导致选了 Qoder 模型也没有「思考强度」可选。
+    reasoning: m.reasoning === true,
   }));
 
   const piProvider = createProvider({

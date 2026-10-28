@@ -125,24 +125,23 @@ describe("client.js 能被宿主的 loader 加载", () => {
   });
 
   /**
-   * 回归锚点：**每个 slot 都必须带 `inject` 回调**。
+   * 回归锚点：**每个 slot 都必须带 `inject` 回调，无例外**。
    *
-   * 实测事故（2026-10-28）：不传 `inject` 时宿主走默认注入路径，
+   * 实测事故（2026-10-28，踩了两次）：不传 `inject` 时宿主走默认注入路径，
    * 会调 `directoryFor()` 去要 `remote.session`，而那个服务不在我们的
    * 声明里 —— 于是抛出
    * `cannot get property "remote.session" without inject`，
-   * 把**模型选择器**整个打不开。
+   * 把**模型选择器**整个打不开（实测现象：选择器里一个模型都没有，
+   * 只剩「模型名 / 推理等级」两行）。
    *
-   * 例外：`conversation.input.model.label` 不用 inject 回调。
-   * 宿主的模型标签槽直接传 `{ provider, model, placement }`，
-   * 参考实现 `dsh-connect-workbuddy` 注册这个槽时也没传（它只传 name + priority），
-   * 而且实测工作正常。其余每个槽都必须带。
+   * 第二次是这样踩的：`conversation.input.model.label` 看参考实现的源码
+   * 注册时只传了 name + priority，就判断"这个槽不需要 inject"。
+   * 结果它同样炸 —— 参考实现没炸是因为它的静态 inject 数组多声明了服务，
+   * 不能反推"这个槽不需要 inject"。所以这里**不再留任何例外**。
    */
-  const NO_INJECT_NEEDED = new Set(["conversation.input.model.label"]);
-
-  it("除模型标签槽外，每个 slot 都带 inject 回调（缺了会让模型选择器崩）", () => {
+  it("每个 slot 都带 inject 回调（缺了会让模型选择器崩）", () => {
+    expect(registered.length).toBeGreaterThan(0);
     for (const entry of registered) {
-      if (NO_INJECT_NEEDED.has(entry.slot)) continue;
       expect(entry.options.inject, `slot ${entry.slot} 缺少 inject 回调`).toBeTypeOf("function");
     }
   });

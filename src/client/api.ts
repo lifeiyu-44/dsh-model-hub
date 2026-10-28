@@ -18,6 +18,43 @@ export function fetchSummary(): Promise<Summary> {
   return getJson<Summary>(`${DATA_PREFIX}/summary`);
 }
 
+/** 目录快照：模型 id -> 倍率与标记。面板用它算模型总数与免费模型数。 */
+export interface CatalogEntry {
+  id: string;
+  name: string;
+  creditMultiplier?: number;
+  promotionBadge?: string;
+  tierBadge?: string;
+  promotionColor?: string;
+  tierColor?: string;
+}
+
+export function fetchCatalog(): Promise<{ models: CatalogEntry[] }> {
+  return getJson<{ models: CatalogEntry[] }>(`${DATA_PREFIX}/catalog`);
+}
+
+/** 诊断栏的数据：storage 层算出来的 + host 补的事实。 */
+export interface DiagData {
+  recordCount: number;
+  oldestRecordAt: number | null;
+  lastError: { at: number; model: string; status: number | null; error: string } | null;
+  currentChannelId: string | null;
+  currentAccountId: string | null;
+  currentAccountName: string | null;
+  pluginVersion?: string;
+  dbPath?: string;
+  dbSizeBytes?: number | null;
+  credentialPath?: string;
+  tokenExpiresAt?: number | null;
+  region?: string | null;
+  shimUrl?: string;
+  modelCount?: number;
+}
+
+export function fetchDiag(): Promise<DiagData> {
+  return getJson<DiagData>(`${DATA_PREFIX}/diag`);
+}
+
 export function fetchChannels(): Promise<ChannelsResponse> {
   return getJson<ChannelsResponse>(`${DATA_PREFIX}/channels`);
 }

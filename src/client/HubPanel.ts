@@ -1,31 +1,28 @@
 import React from "react";
 import { HubCard } from "./HubCard.js";
+import { ensureStyles } from "./styles.js";
 
 /**
- * Model Hub 主面板 —— 设置卡片与记录弹层的统一入口。
+ * Model Hub 主面板 —— 左下角按钮打开的弹层外壳。
  *
- * 设计原型有三块，当前落点：
- * - **设置卡片** → 本面板。`HubCard` 内含四栏：账号 / 渠道 / 记录 / 诊断。
- * - **记录弹层** → 卡片「记录」栏的「查看全部」打开
- *   （`RecordsModal`，含筛选 + CSV 导出）。
- * - **输入框胶囊** → **已移除**。它拿不到「当前选中模型」，只能显示上一条记录，
- *   于是用户选了 A 却看到 B 的 tok/s，看起来像 B 正在生效；
- *   且 `composer.dock` 与 `input.left` 在该宿主版本都会挂载，会重复渲染两次。
- *   同样的数字在「记录」栏里已有，不在输入框制造误导。
+ * **只做遮罩与定位，不自带标题栏**：原型的标题（`Model Hub` + 描述 +
+ * 「一键认证」）在卡片自己的 `card-head` 里。之前这里也画了一个标题，
+ * 于是面板上出现两行一模一样的 "DSH Model Hub"（用户截图指出过）。
  *
- * 为什么需要这个面板而不是只靠「插件」设置页：
- * 设置页里的卡片要展开插件行才看得到，用户找不到入口
- * （实测反馈「设置里面也没找到」）。左下角这个按钮是直达入口。
+ * 三个原型视图的落点：
+ * - ① 设置卡片 → `HubCard`（四栏：账号 / 渠道 / 记录 / 诊断）
+ * - ② 请求记录页 → 卡片「记录」栏的「查看全部」打开 `RecordsModal`
+ * - ③ 输入框胶囊 → **已移除**（该槽拿不到当前选中模型，会显示上一条记录，
+ *   看起来像别的模型正在生效；且该槽会重复挂载两处）
+ *
+ * 关闭：Esc、点遮罩。
  */
 
 const h = React.createElement;
 
 export function HubPanel(props: { onClose: () => void }): React.ReactElement {
-  // Esc 关闭整个面板。
-  //
-  // 记录弹层渲染在卡片内部（同一棵 React 树），它的 Esc 监听与这里会同时触发，
-  // 结果是「一次 Esc 把两层都关掉」—— 可接受，且比「按了没反应」好。
-  // 不做「先关内层」的判定，因为那要靠 DOM 探测两棵树的叠放顺序，脆弱。
+  ensureStyles();
+
   React.useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       if (event.key === "Escape") props.onClose();
@@ -37,63 +34,15 @@ export function HubPanel(props: { onClose: () => void }): React.ReactElement {
   return h(
     "div",
     {
+      className: "dmh-overlay",
       onClick: (event: React.MouseEvent) => {
         if (event.target === event.currentTarget) props.onClose();
-      },
-      style: {
-        position: "fixed" as const,
-        inset: 0,
-        zIndex: 1000,
-        background: "rgba(0,0,0,0.45)",
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-        padding: 24,
       },
     },
     h(
       "div",
-      {
-        role: "dialog",
-        "aria-modal": true,
-        "aria-label": "DSH Model Hub",
-        style: {
-          width: "100%",
-          maxWidth: 720,
-          maxHeight: "82vh",
-          display: "flex",
-          flexDirection: "column" as const,
-          padding: 20,
-          borderRadius: 12,
-          background: "var(--dsh-color-bg-elevated, #fff)",
-          color: "var(--dsh-color-text, #111827)",
-          boxShadow: "0 20px 50px rgba(0,0,0,0.3)",
-          overflow: "auto",
-        },
-      },
-      h(
-        "div",
-        { style: { display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 } },
-        h("strong", { style: { fontSize: 15 } }, "DSH Model Hub"),
-        h(
-          "button",
-          {
-            onClick: props.onClose,
-            "aria-label": "关闭",
-            style: {
-              border: "none",
-              background: "transparent",
-              fontSize: 20,
-              lineHeight: 1,
-              cursor: "pointer",
-              color: "var(--dsh-color-text-secondary, #6b7280)",
-              padding: "2px 6px",
-            },
-          },
-          "×",
-        ),
-      ),
-      h(HubCard),
+      { className: "dmh-scope dmh-overlay-body", role: "dialog", "aria-modal": true, "aria-label": "Model Hub" },
+      h("div", { style: { width: 720, maxWidth: "100%" } }, h(HubCard)),
     ),
   );
 }

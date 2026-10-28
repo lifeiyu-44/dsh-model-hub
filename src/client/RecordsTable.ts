@@ -1,14 +1,15 @@
 import React from "react";
-import { formatCount, formatMs, formatTps, formatClock } from "./format.js";
+import { formatCount, formatClock, formatMs, formatTps } from "./format.js";
 import type { RequestRow } from "./types.js";
 
 /**
- * 记录明细表。
+ * 记录明细表 —— **按原型视图 ② 的表实现**。
  *
- * 设计要求：「弹层全部显示，靠表格自身滚动，不做分页折叠」。
+ * 原型列（顺序不能变）：时间 / 渠道 / 模型 / in / out / cache / TTFT / tok/s / 耗时 / 状态。
+ *
+ * 设计要求「弹层全部显示，靠表格自身滚动，不做分页折叠」：
  * 所以这里不切片、不虚拟滚动 —— 2000 行的上限在 host 侧就卡住了
- * （`queryRequests` 的 limit 夹在 1..2000），渲染 2000 个 <tr> 在现代浏览器里
- * 是可以接受的，而分页会让「一眼看全」这个需求落空。
+ * （`queryRequests` 的 limit 夹在 1..2000）。分页会让「一眼看全」落空。
  */
 
 export const RECORD_COLUMNS = [
@@ -24,116 +25,71 @@ export const RECORD_COLUMNS = [
   { key: "status_code", label: "状态" },
 ] as const;
 
-/** 状态码 -> 语义色。2xx 绿、4xx 黄、5xx 红、缺失灰。 */
-export function statusTone(code: number | null): "ok" | "warn" | "bad" | "none" {
-  if (code === null) return "none";
-  if (code >= 200 && code < 300) return "ok";
-  if (code >= 400 && code < 500) return "warn";
-  if (code >= 500) return "bad";
-  return "none";
+/** 右对齐的数值列。 */
+const NUMERIC = new Set(["input_tokens", "output_tokens", "cache_read", "first_token_ms", "decode_tps", "duration_ms"]);
+
+/** 状态码 -> 原型里的徽标类：2xx 用 `dmh-free`（绿），其余用 `dmh-err`（红）。 */
+function statusBadge(code: number | null): React.ReactElement {
+  if (code === null) return React.createElement("span", { className: "dmh-badge" }, "—");
+  const ok = code >= 200 && code < 300;
+  return React.createElement("span", { className: `dmh-badge ${ok ? "dmh-free" : "dmh-err"}` }, String(code));
 }
 
-const TONE_COLOR: Record<string, string> = {
-  ok: "var(--dsh-color-success, #22c55e)",
-  warn: "var(--dsh-color-warning, #f59e0b)",
-  bad: "var(--dsh-color-danger, #ef4444)",
-  none: "var(--dsh-color-text-tertiary, #9ca3af)",
-};
+/** 渠道 id 缩短成原型那种 `WB-Global`。 */
+function shortChannel(id: string): string {
+  const tail = id.replace(/^hub-/, "");
+  if (tail.startsWith("workbuddy")) return `WB-${tail.includes("cn") ? "CN" : "Global"}`;
+  return tail;
+}
 
 export function RecordsTable(props: { rows: RequestRow[] }): React.ReactElement {
   const { rows } = props;
+  const h = React.createElement;
 
   if (rows.length === 0) {
-    return React.createElement(
-      "div",
-      { style: { padding: "32px 0", textAlign: "center", color: "var(--dsh-color-text-tertiary, #9ca3af)" } },
-      "还没有请求记录。用 hub- 渠道的模型发一条消息后，这里会出现明细。",
-    );
+    return h("div", { className: "dmh-note" }, "还没有请求记录。用 hub- 渠道的模型发一条消息后，这里会出现明细。");
   }
 
-  const th = (label: string, align: "left" | "right" = "left") =>
-    React.createElement(
-      "th",
-      {
-        key: label,
-        style: {
-          position: "sticky" as const,
-          top: 0,
-          zIndex: 1,
-          background: "var(--dsh-color-bg-elevated, #fff)",
-          textAlign: align,
-          padding: "8px 10px",
-          fontWeight: 600,
-          fontSize: 12,
-          whiteSpace: "nowrap" as const,
-          borderBottom: "1px solid var(--dsh-color-border, #e5e7eb)",
-        },
-      },
-      label,
-    );
-
-  const td = (content: React.ReactNode, key: string, align: "left" | "right" = "left", extra?: React.CSSProperties) =>
-    React.createElement(
-      "td",
-      {
-        key,
-        style: {
-          padding: "6px 10px",
-          textAlign: align,
-          fontSize: 12,
-          fontVariantNumeric: "tabular-nums",
-          whiteSpace: "nowrap" as const,
-          borderBottom: "1px solid var(--dsh-color-border-subtle, #f3f4f6)",
-          ...extra,
-        },
-      },
-      content,
-    );
-
-  return React.createElement(
-    "div",
-    { style: { overflow: "auto", maxHeight: "52vh", border: "1px solid var(--dsh-color-border, #e5e7eb)", borderRadius: 8 } },
-    React.createElement(
-      "table",
-      { style: { borderCollapse: "collapse" as const, width: "100%", fontSize: 12 } },
-      React.createElement(
-        "thead",
+  return h(
+    "table",
+    { className: "dmh-table" },
+    h(
+      "thead",
+      null,
+      h(
+        "tr",
         null,
-        React.createElement(
-          "tr",
-          null,
-          RECORD_COLUMNS.map((column) =>
-            th(column.label, ["input_tokens", "output_tokens", "cache_read", "first_token_ms", "decode_tps", "duration_ms"].includes(column.key) ? "right" : "left"),
-          ),
+        RECORD_COLUMNS.map((column) =>
+          h("th", { key: column.key, className: NUMERIC.has(column.key) ? "dmh-num" : undefined }, column.label),
         ),
       ),
-      React.createElement(
-        "tbody",
-        null,
-        rows.map((row) =>
-          React.createElement(
-            "tr",
-            { key: row.request_id },
-            td(formatClock(row.created_at), "t"),
-            td(row.channel_id, "c", "left", { color: "var(--dsh-color-text-secondary, #6b7280)" }),
-            td(
-              // estimated 的记录要标出来 —— 那是字符数估算，不是上游真实计数
-              row.estimated === 1 ? `${row.model} *` : row.model,
-              "m",
-              "left",
-              row.estimated === 1 ? { fontStyle: "italic" } : undefined,
-            ),
-            td(formatCount(row.input_tokens), "in", "right"),
-            td(formatCount(row.output_tokens), "out", "right"),
-            td(formatCount(row.cache_read), "ca", "right"),
-            td(formatMs(row.first_token_ms), "ttft", "right"),
-            td(formatTps(row.decode_tps), "tps", "right"),
-            td(formatMs(row.duration_ms), "dur", "right"),
-            td(row.status_code === null ? "—" : String(row.status_code), "st", "left", {
-              color: TONE_COLOR[statusTone(row.status_code)],
-              fontWeight: 600,
-            }),
+    ),
+    h(
+      "tbody",
+      null,
+      rows.map((row) =>
+        h(
+          "tr",
+          { key: row.request_id },
+          h("td", { className: "dmh-mono" }, formatClock(row.created_at)),
+          h("td", null, shortChannel(row.channel_id)),
+          // estimated 的记录要标出来 —— 那是字符数估算，不是上游真实计数
+          h("td", null, row.estimated === 1 ? `${row.model} *` : row.model),
+          h("td", { className: "dmh-num" }, formatCount(row.input_tokens)),
+          h("td", { className: "dmh-num" }, formatCount(row.output_tokens)),
+          h("td", { className: "dmh-num" }, formatCount(row.cache_read)),
+          h("td", { className: "dmh-num" }, formatMs(row.first_token_ms)),
+          h(
+            "td",
+            {
+              className: `dmh-num dmh-tps${
+                row.decode_tps === null ? " dmh-na" : row.decode_tps < 25 ? " dmh-slow" : ""
+              }`,
+            },
+            formatTps(row.decode_tps),
           ),
+          h("td", { className: "dmh-num" }, formatMs(row.duration_ms)),
+          h("td", null, statusBadge(row.status_code)),
         ),
       ),
     ),

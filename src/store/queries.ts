@@ -160,3 +160,68 @@ export function queryRequests(db: DatabaseSync, filter: RecordFilter) {
 export function queryModels(db: DatabaseSync) {
   return db.prepare("SELECT DISTINCT model FROM requests ORDER BY model").all() as { model: string }[];
 }
+
+/**
+ * 诊断栏要的事实。
+ *
+ * 这里只放**能从库里算出来**的；路径、版本、凭据这些由调用方补
+ * （见 `routes/data.ts` 的 `/diag`）—— 那是 host 侧的知识，不属于存储层。
+ */
+export interface DiagFacts {
+  /** 库里一共有多少条请求记录。 */
+  recordCount: number;
+  /** 最早一条记录的时间戳（毫秒）；没有记录时 null。 */
+  oldestRecordAt: number | null;
+  /** 最近一条**失败**记录的原文（含状态码），没有失败时 null。 */
+  lastError: { at: number; model: string; status: number | null; error: string } | null;
+  /** 当前标记为使用的渠道 / 账号 id。 */
+  currentChannelId: string | null;
+  currentAccountId: string | null;
+  currentAccountName: string | null;
+}
+
+export function queryDiagFacts(db: DatabaseSync): DiagFacts {
+  const count = db.prepare("SELECT COUNT(*) AS c, MIN(created_at) AS oldest FROM requests").get() as
+    | { c: number; oldest: number | null }
+    | undefined;
+
+  // 「失败」= 状态码不在 2xx，或者 error 非空。
+  // 不要用 `status_code != 200` —— 201/204 也是成功。
+  const lastErrorRow = db
+    .prepare(
+      `SELECT created_at, model, status_code, error
+         FROM requests
+        WHERE error IS NOT NULL
+           OR status_code IS NULL
+           OR status_code < 200
+           OR status_code >= 300
+        ORDER BY created_at DESC
+        LIMIT 1`,
+    )
+    .get() as { created_at: number; model: string; status_code: number | null; error: string | null } | undefined;
+
+  const channel = db
+    .prepare("SELECT id FROM channels WHERE enabled = 1 ORDER BY id LIMIT 1")
+    .get() as { id: string } | undefined;
+
+  const account = db
+    .prepare("SELECT id, display_name FROM accounts WHERE enabled = 1 ORDER BY is_current DESC, id LIMIT 1")
+    .get() as { id: string; display_name: string } | undefined;
+
+  return {
+    recordCount: count?.c ?? 0,
+    oldestRecordAt: count?.oldest ?? null,
+    lastError:
+      lastErrorRow === undefined
+        ? null
+        : {
+            at: lastErrorRow.created_at,
+            model: lastErrorRow.model,
+            status: lastErrorRow.status_code,
+            error: lastErrorRow.error ?? "（上游未返回错误正文）",
+          },
+    currentChannelId: channel?.id ?? null,
+    currentAccountId: account?.id ?? null,
+    currentAccountName: account?.display_name ?? null,
+  };
+}

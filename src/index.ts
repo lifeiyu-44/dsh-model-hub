@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { statSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { resolveDshHome } from "@deepseek-ai/dsh-home-paths";
@@ -17,6 +18,24 @@ import { registerDataRoutes } from "./routes/data.js";
 export const name = "dsh-model-hub";
 export { Config };
 export const inject = ["llm"];
+
+/**
+ * 面板诊断栏显示的版本号。
+ *
+ * 与 `package.json` 的 `version` 必须一致 —— 单测 `tests/diag.spec.ts` 守着这条，
+ * 因为它是最容易忘记同步的一处（发布时改了 package.json 忘了改这里，
+ * 用户报障时看到的版本就是错的）。
+ */
+export const PLUGIN_VERSION = "0.1.0";
+
+/** 数据库文件字节数；文件还不存在（首次启动）时返回 null，不返回 0。 */
+function fileSizeOrNull(path: string): number | null {
+  try {
+    return statSync(path).size;
+  } catch {
+    return null;
+  }
+}
 
 const PROVIDER_GLOBAL = `${PROVIDER_PREFIX}workbuddy-global`;
 
@@ -173,7 +192,22 @@ function applyInner(ctx: any, config: any): void {
     // 会让整个 host `exit 1`，进而触发 DSH 把 profile 重置为默认
     // （bundles 清空、cordis.patch.yml 被覆盖）—— 实测踩过两次。
     // 两种写法的差异由 tests/webserver-access.spec.ts 用真实 Cordis 定死。
-    registerDataRoutes(ctx, { db, catalog: () => models });
+    registerDataRoutes(ctx, {
+      db,
+      catalog: () => models,
+      // 诊断栏里只有 host 知道的事实。全部来自本次启动的实测值，
+      // 不是写死的字符串 —— 面板上写假值比不写更糟。
+      diag: () => ({
+        pluginVersion: PLUGIN_VERSION,
+        dbPath,
+        dbSizeBytes: fileSizeOrNull(dbPath),
+        credentialPath: credential.source,
+        tokenExpiresAt: credential.parsed.expiresAtMs ?? null,
+        region: credential.parsed.region ?? null,
+        shimUrl: shim.baseUrl(),
+        modelCount: models.length,
+      }),
+    });
 
     ctx.logger?.info?.(
       `dsh-model-hub: 已注册 ${PROVIDER_GLOBAL}（${models.length} 个模型），shim=${shim.baseUrl()}`,

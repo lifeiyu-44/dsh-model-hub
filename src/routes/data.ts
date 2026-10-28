@@ -2,6 +2,7 @@ import type { DatabaseSync } from "node:sqlite";
 import {
   queryAccounts,
   queryChannels,
+  queryDiagFacts,
   queryModels,
   queryRequests,
   querySummary,
@@ -59,6 +60,12 @@ export function registerDataRoutes(
       promotionColor?: string;
       tierColor?: string;
     }[];
+    /**
+     * 诊断栏里**只有 host 知道**的那些事实：版本、库文件大小、凭据路径、
+     * token 有效期。存储层算不出来的都从这里补（见诊断栏的设计意图：
+     * 这一栏存在的唯一理由就是能被整段贴进问题反馈）。
+     */
+    diag?: () => Record<string, unknown>;
   },
 ): void {
   ctx.inject(["webServer"], (inner: any) => {
@@ -106,6 +113,14 @@ export function registerDataRoutes(
             handler: (req: any, res: any) => {
               if (!gate(req, res)) return;
               json(res, 200, { channels: queryChannels(deps.db), accounts: queryAccounts(deps.db) });
+            },
+          }),
+          inner.webServer.register({
+            kind: "exact",
+            path: `${DATA_PREFIX}/diag`,
+            handler: (req: any, res: any) => {
+              if (!gate(req, res)) return;
+              json(res, 200, { ...queryDiagFacts(deps.db), ...(deps.diag?.() ?? {}) });
             },
           }),
         ];

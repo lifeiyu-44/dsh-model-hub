@@ -2,6 +2,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import { TurnTimer, type NormalizedUsage, type TurnMetrics } from "./recorder.js";
 import { parseSseLine } from "./upstream.js";
+import { ensureSystemHead } from "./prepare.js";
 
 export interface ShimDeps {
   /** 上游地址与请求头，由渠道后端提供。 */
@@ -99,11 +100,15 @@ export async function startShim(deps: ShimDeps): Promise<ShimHandle> {
         /* 请求体不是 JSON 就照原样转发，模型名留 unknown */
       }
 
+      // 国际网关拒收首条不是 system 的请求（400 / 11128）。补头必须在
+      // shim 这一层做 —— 这是最后一个能看到并改写请求体的地方。
+      const body = ensureSystemHead(raw);
+
       const { baseUrl, headers } = await deps.prepare();
       const upstream = await fetch(`${baseUrl}/v2/chat/completions`, {
         method: "POST",
         headers: { ...headers, "content-type": "application/json" },
-        body: raw,
+        body,
       });
       timer.onUpstreamHead(Date.now());
       statusCode = upstream.status;

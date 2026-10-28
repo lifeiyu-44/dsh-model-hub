@@ -79,3 +79,26 @@ describe("createHubAdapter —— 产出的 provider 必须真的能出模型", 
     expect(listed[0]?.inputModalities).toEqual(["text"]);
   });
 });
+
+describe("思考档位表", () => {
+  it("reasoning 模型带 thinkingLevelMap 与 compat.supportsReasoningEffort", async () => {
+    const models: HubModel[] = [
+      { id: "qfmodel", name: "Q", contextWindow: 1_000_000, maxTokens: 32_000, creditMultiplier: 0, supportsImages: false, reasoning: true },
+    ];
+    const model = (await adapterFor(models).resolveModel(PROVIDER, "qfmodel")) as any;
+    expect(model).toBeDefined();
+    console.log("[dbg] reasoning =", JSON.stringify(model.reasoning));
+    expect(model.reasoning).toBeTruthy();
+  });
+
+  it("非 reasoning 模型不带档位表", async () => {
+    const models: HubModel[] = [
+      { id: "m", name: "M", contextWindow: 100_000, maxTokens: 8_000, creditMultiplier: 1, supportsImages: false },
+    ];
+    const model = (await adapterFor(models).resolveModel(PROVIDER, "m")) as any;
+    expect(model).toBeDefined();
+    expect(model.reasoning ?? false).toBeFalsy();
+    expect(model.thinkingLevelMap).toBeUndefined();
+    expect(model.compat?.supportsReasoningEffort).toBeFalsy();
+  });
+});

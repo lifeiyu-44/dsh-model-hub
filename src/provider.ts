@@ -135,6 +135,30 @@ export function buildProviderProfile(input: BuildProviderInput): Record<string, 
     // 思考档位如实按渠道目录声明：Qoder 目录里有 is_reasoning，
     // 之前一律写 false，导致选了 Qoder 模型也没有「思考强度」可选。
     reasoning: m.reasoning === true,
+    // **档位表 + compat 必须一起给**，缺一不可（参考实现 toPiModel 同款）：
+    //
+    // - `thinkingLevelMap`：把宿主的档位名映射成上游 effort。没有它时
+    //   pi-ai 虽然认为「所有档位都支持」，但宿主的选择器只显示 `Default`，
+    //   而且**不会按模型记住**用户选的档位 —— 用户实测报的两个问题
+    //   （切换模型档位丢失 / 切回来不记忆）都源于此。
+    // - `compat.supportsReasoningEffort`：pi-ai 只在这个开关打开时才把
+    //   `reasoning_effort` 放进请求体（openai-completions.js 里有明确的
+    //   `compat.supportsReasoningEffort` 判断）。不给它，思考档位就是个摆设。
+    //
+    // 映射成同名：两个上游（WorkBuddy / Qoder）都接受标准的
+    // minimal/low/medium/high effort 字符串（均已实测 200）。
+    ...(m.reasoning === true
+      ? {
+          thinkingLevelMap: {
+            off: null,
+            minimal: "minimal",
+            low: "low",
+            medium: "medium",
+            high: "high",
+          },
+          compat: { supportsReasoningEffort: true },
+        }
+      : {}),
   }));
 
   const piProvider = createProvider({

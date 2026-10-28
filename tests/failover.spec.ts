@@ -76,10 +76,16 @@ describe("shim 换号重试", () => {
         { id: "a1", ok: false, status: 401 },
         { id: "a2", ok: true, status: 200 },
       ]);
-      // record 在 finally 里同步调用，但给事件循环一拍确保已落地
+      // record 每次**上游尝试**各一行（规格 §6）：401 那枪 + 200 那枪各一行，
+      // account_id 各归各 —— 记录表才对得上「这次请求换过号」，
+      // 否则面板只看到一枪 200，被换掉的账号像从没失败过。
       await new Promise((r) => setTimeout(r, 100));
-      expect(records).toHaveLength(1); // 最终成功只记一行
-      expect(records[0].accountId).toBe("a2");
+      expect(records).toHaveLength(2);
+      expect(records[0]).toMatchObject({ statusCode: 401, accountId: "a1" });
+      expect(String(records[0].error)).toContain("401");
+      expect(records[0].metrics.outputTokens).toBe(0); // 被换掉的尝试没有产出
+      expect(records[1]).toMatchObject({ statusCode: 200, accountId: "a2" });
+      expect(records[1].error).toBeUndefined();
       await res.text();
     } finally {
       shim.close();
@@ -133,6 +139,7 @@ describe("shim 换号重试", () => {
     const accounts = ["a1", "a2"];
     let pick = 0;
     const results: any[] = [];
+    const records: any[] = [];
     const shim = await startShim({
       prepare: async () => ({
         baseUrl: `http://127.0.0.1:${port}`,
@@ -144,7 +151,7 @@ describe("shim 换号重试", () => {
         results.push({ id: account.id, ok, status });
         if (!ok) pick = Math.min(pick + 1, accounts.length - 1);
       },
-      record: () => {},
+      record: (r) => records.push(r),
     });
 
     try {
@@ -164,6 +171,11 @@ describe("shim 换号重试", () => {
         { id: "a1", ok: false, status: 502 },
         { id: "a2", ok: true, status: 200 },
       ]);
+      // 同样每次尝试各记一行：502 那枪 + 200 那枪
+      await new Promise((r) => setTimeout(r, 100));
+      expect(records).toHaveLength(2);
+      expect(records[0]).toMatchObject({ statusCode: 502, accountId: "a1" });
+      expect(records[1]).toMatchObject({ statusCode: 200, accountId: "a2" });
       await res.text();
     } finally {
       shim.close();

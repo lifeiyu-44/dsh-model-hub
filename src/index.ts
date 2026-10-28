@@ -197,9 +197,19 @@ function applyInner(ctx: any, config: any): void {
       const sessions = createSessionManager();
       const qoderSession = await sessions.current();
       if (qoderSession === undefined) {
-        ctx.logger?.warn?.(
-          "dsh-model-hub: 未找到 Qoder PAT（~/.dsh/qoder/pat 或 QODERCN_PAT），Qoder 渠道不注册",
-        );
+        // 没有 legacy 可见的 PAT ≠ 渠道必死：用户可能只经面板贴过 PAT
+        // （credential_ref 指向 qoder-pats/*.pat，legacy 扫描看不见它们）。
+        // 池非空就照常 ensureRuntime —— runtime 的 patOf 按各账号的
+        // credential_ref 现读文件，不依赖这里的会话探针（终审 C1：旧代码
+        // 此时直接跳过，渠道重启即失联，而一键认证对 Qoder 只验活不登记，
+        // 用户没有任何入口能救回）。只有池也空（真没有账号）才发原 warn。
+        if (state.poolSize(PROVIDER_QODER) > 0) {
+          await state.ensureRuntime(PROVIDER_QODER);
+        } else {
+          ctx.logger?.warn?.(
+            "dsh-model-hub: 未找到 Qoder PAT（~/.dsh/qoder/pat 或 QODERCN_PAT），Qoder 渠道不注册",
+          );
+        }
       } else {
         ctx.logger?.info?.(`dsh-model-hub: Qoder 凭据 ${qoderSession.source}（uid ${qoderSession.userID.slice(0, 8)}…）`);
         // 与 WorkBuddy 相同的两步：登记（只存引用）→ ensureRuntime。

@@ -26,14 +26,21 @@ export interface ShimDeps {
    * 不给时行为与以前完全一致 —— 现有渠道不受影响。
    */
   dialect?: ShimDialect;
-  /** 记录一次完成的请求。抛错不得影响响应。 */
+  /**
+   * 记录一次完成的请求。抛错不得影响响应。
+   *
+   * 「一次请求」= 一次**上游尝试**（规格 §6）：换号前被淘汰的尝试也要各记
+   * 一行（statusCode=该次响应状态、metrics 零值），只有没有 HTTP 语义的
+   * 网络错误才允许 statusCode 缺省（库里落 NULL）。最终采用的尝试由
+   * handle 的 finally 兜底记录，两条路径不重复。
+   */
   record(input: {
     metrics: TurnMetrics;
-    statusCode: number;
+    statusCode?: number;
     error?: string;
     isStreaming: boolean;
     model: string;
-    /** 本次请求最终采用的账号；渠道没给 account 时为 undefined。 */
+    /** 本次尝试采用的账号；渠道没给 account 时为 undefined。 */
     accountId?: string;
   }): void;
 }
@@ -139,6 +146,25 @@ export async function startShim(deps: ShimDeps): Promise<ShimHandle> {
     let account: { id: string } | undefined;
     let upstream!: Response;
 
+    // 被换掉的中间尝试也要各记一行（规格 §6「每次上游尝试各写一行」）：
+    // 不记的话，一次换号请求在记录表里只留最终那行，面板看不到「换过号」，
+    // 失败的账号也像从没失败过。metrics 用零值（没有产出、没有 usage）；
+    // TurnTimer.onEnd 是纯函数，这里调用不影响 finally 里最终那次的成绩。
+    const recordAttempt = (input: { statusCode?: number; error?: string; accountId?: string }): void => {
+      try {
+        deps.record({
+          metrics: timer.onEnd(Date.now()),
+          ...(input.statusCode === undefined ? {} : { statusCode: input.statusCode }),
+          ...(input.error === undefined ? {} : { error: input.error }),
+          isStreaming: false,
+          model,
+          ...(input.accountId === undefined ? {} : { accountId: input.accountId }),
+        });
+      } catch {
+        /* 观测失败不能影响换号 */
+      }
+    };
+
     try {
       const raw = await readBody(req);
       try {
@@ -189,13 +215,18 @@ export async function startShim(deps: ShimDeps): Promise<ShimHandle> {
         } catch (networkError) {
           // 网络错误也换号（可能只是这个账号的网关不通）；shim 只如实上报
           // 错误文案，计不计熔断由渠道侧的 reportResult 决定。
+          const brief = networkError instanceof Error ? networkError.message : String(networkError);
           deps.onAccountResult?.(
             prepared.account ?? { id: "" },
             false,
             undefined,
-            networkError instanceof Error ? networkError.message : String(networkError),
+            brief,
           );
-          if (attempt < maxAttempts) continue;
+          if (attempt < maxAttempts) {
+            // 网络错误没有 HTTP 状态码：statusCode 缺省，库里落 NULL
+            recordAttempt({ error: brief, accountId: prepared.account?.id });
+            continue;
+          }
           throw networkError;
         }
         // 换号条件：凭据类（401/402/403/429）或 5xx（500-599）；400 不换号。
@@ -209,6 +240,12 @@ export async function startShim(deps: ShimDeps): Promise<ShimHandle> {
           deps.onAccountResult?.(prepared.account ?? { id: "" }, false, resp.status);
           // 响应体不打算读就要 cancel 掉，否则连接挂着不回收。
           void resp.body?.cancel();
+          // 换号前先给这次尝试留一行记录（statusCode=该次响应状态）
+          recordAttempt({
+            statusCode: resp.status,
+            error: `upstream HTTP ${resp.status}`,
+            accountId: prepared.account?.id,
+          });
           continue; // 尚未向客户端发出任何字节，可以换号
         }
         upstream = resp;
@@ -345,7 +382,8 @@ export async function startShim(deps: ShimDeps): Promise<ShimHandle> {
           ...(error === undefined ? {} : { error }),
           isStreaming: streaming,
           model,
-          // 换号后 record 只记最终采用的账号，面板才能对得上「谁在服务」。
+          // 换号后 record 记的是最终采用的账号，面板才能对得上「谁在服务」；
+          // 被换掉的中间尝试已在循环里各记一行（recordAttempt）。
           accountId: account?.id,
         });
       } catch {

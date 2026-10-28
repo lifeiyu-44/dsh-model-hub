@@ -462,7 +462,8 @@ function makeRecorder(
 ) {
   return (input: {
     metrics: TurnMetrics;
-    statusCode: number;
+    /** 换号前被淘汰的网络错误尝试没有状态码：缺省（库里落 NULL）。 */
+    statusCode?: number;
     error?: string;
     isStreaming: boolean;
     model: string;
@@ -485,7 +486,7 @@ function makeRecorder(
         ...(metrics.upstreamHeadMs === undefined ? {} : { upstreamHeadMs: metrics.upstreamHeadMs }),
         ...(metrics.durationMs === undefined ? {} : { durationMs: metrics.durationMs }),
         ...(metrics.decodeTps === undefined ? {} : { decodeTps: metrics.decodeTps }),
-        statusCode,
+        ...(statusCode === undefined ? {} : { statusCode }),
         ...(error === undefined ? {} : { error }),
         isStreaming,
         estimated: metrics.estimated,

@@ -13,7 +13,7 @@ describe("openHubDatabase", () => {
     const { application_id } = db.prepare("PRAGMA application_id").get() as { application_id: number };
     expect(application_id).toBe(0x48554231);
     const { user_version } = db.prepare("PRAGMA user_version").get() as { user_version: number };
-    expect(user_version).toBe(1);
+    expect(user_version).toBe(2);
     const tables = db.prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name").all() as { name: string }[];
     expect(tables.map((t) => t.name)).toEqual(["accounts", "channels", "daily_rollups", "requests"]);
     db.close();

@@ -99,9 +99,10 @@ export function queryAccounts(db: DatabaseSync) {
   return db
     .prepare(
       `SELECT id, channel_id, display_name, enabled, is_current,
-              consecutive_failures, last_error, last_ok_at, created_at,
+              consecutive_failures, cooldown_until, last_error, last_ok_at, created_at,
               CASE WHEN credential_ref IS NULL OR credential_ref = '' THEN 0 ELSE 1 END AS has_credential
        FROM accounts
+       WHERE deleted = 0
        ORDER BY channel_id, display_name`,
     )
     .all();

@@ -35,6 +35,10 @@ export async function openHubDatabase(path: string) {
 
     const { user_version: version } = db.prepare("PRAGMA user_version").get() as { user_version: number };
     if (version < 1) db.exec(SCHEMA_V1);
+    if (version < 2) {
+      db.exec("ALTER TABLE accounts ADD COLUMN deleted INTEGER NOT NULL DEFAULT 0");
+      db.exec("ALTER TABLE accounts ADD COLUMN cooldown_until INTEGER");
+    }
     if (version !== HUB_SCHEMA_VERSION) db.exec(`PRAGMA user_version = ${HUB_SCHEMA_VERSION}`);
     if (version === 0) db.exec(`PRAGMA application_id = ${HUB_APP_ID}`);
 

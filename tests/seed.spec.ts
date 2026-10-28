@@ -20,6 +20,10 @@ const SCHEMA = readFileSync(join(HERE, "..", "src", "store", "schema.sql"), "utf
 function freshDb() {
   const db = new DatabaseSync(":memory:");
   db.exec(SCHEMA);
+  // schema.sql 是 v1 DDL；v2 的两列靠 openHubDatabase 的迁移 ALTER 补上。
+  // 这里测纯存储层、绕过了 openHubDatabase，所以照搬 db.ts 里那两条 ALTER。
+  db.exec("ALTER TABLE accounts ADD COLUMN deleted INTEGER NOT NULL DEFAULT 0");
+  db.exec("ALTER TABLE accounts ADD COLUMN cooldown_until INTEGER");
   return db;
 }
 

@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { resolveDshHome } from "@deepseek-ai/dsh-home-paths";
 import type { ParsedAuth, Region } from "./auth.js";
@@ -16,48 +16,78 @@ import type { ParsedAuth, Region } from "./auth.js";
  * 是明文字符串）。它是本机同一个用户、同一个账号、同一台机器上的既有产物，
  * 读它比自己造一套解密器更诚实，也不复制任何密钥。
  *
- * **只读**：这个函数绝不写回 vault。文件权限与所有权属于那个插件。
+ * **只读**：这两个函数绝不写回 vault。文件权限与所有权属于那个插件。
+ */
+
+/** vault 里一条可用的账号条目（一个 `.json` 文件一个账号）。 */
+export interface VaultEntry {
+  /** 文件名去掉 `.json`。 */
+  accountId: string;
+  /** 文件路径 —— 凭据只存引用，绝不落明文进 DB/日志。 */
+  source: string;
+  region: Region;
+  parsed: ParsedAuth;
+}
+
+/** vault 的区域目录，扫描顺序与旧 readWorkbuddyVault 一致（global 优先）。 */
+const VAULT_REGIONS: Region[] = ["global", "cn"];
+
+/**
+ * vault 下全部可用的账号条目（多账号）。
+ *
+ * 按区域遍历全部 `.json`，只收「明文（plain）且有 token」的条目；
+ * 坏文件 / 缺 auth / token 不是非空字符串的一律跳过（fail-soft，不抛）。
+ * 目录不存在返回空数组。
+ */
+export function listVaultEntries(root: string = join(resolveDshHome(), "workbuddy-vault")): VaultEntry[] {
+  const out: VaultEntry[] = [];
+  for (const region of VAULT_REGIONS) {
+    const dir = join(root, region);
+    let names: string[];
+    try {
+      names = readdirSync(dir).filter((name) => name.endsWith(".json"));
+    } catch {
+      continue; // 区域目录不存在或读不了
+    }
+    for (const name of names) {
+      const source = join(dir, name);
+      try {
+        const doc = JSON.parse(readFileSync(source, "utf8")) as Record<string, unknown>;
+        const auth = doc["auth"] as Record<string, unknown> | undefined;
+        const token = auth?.["accessToken"];
+        if (typeof token !== "string" || token === "") continue;
+        const refreshToken = auth?.["refreshToken"];
+        const expiresAtRaw = auth?.["expiresAt"];
+        const expiresAt = typeof expiresAtRaw === "number" ? expiresAtRaw * 1000 : undefined;
+        out.push({
+          accountId: name.slice(0, -".json".length),
+          source,
+          region,
+          parsed: {
+            kind: "plain",
+            region,
+            token,
+            ...(typeof refreshToken === "string" ? { refreshToken } : {}),
+            ...(expiresAt === undefined ? {} : { expiresAtMs: expiresAt }),
+          },
+        });
+      } catch {
+        continue; // 坏文件跳过
+      }
+    }
+  }
+  return out;
+}
+
+/**
+ * 取一个「当前可用」的 vault 条目 —— `listVaultEntries` 的首条包装，行为不变。
  *
  * 返回 `undefined` 表示没找到可用的 vault 条目 —— 调用方应当如实报告
  * 「需要先装 WorkBuddy 桌面端登录一次」，而不是假装成功。
  */
 export function readWorkbuddyVault(preferredRegion?: Region): { source: string; parsed: ParsedAuth } | undefined {
-  const root = join(resolveDshHome(), "workbuddy-vault");
-  if (!existsSync(root)) return undefined;
-
-  const regions: Region[] = preferredRegion === undefined ? ["global", "cn"] : [preferredRegion];
-  for (const region of regions) {
-    const dir = join(root, region);
-    if (!existsSync(dir)) continue;
-    let entries: string[];
-    try {
-      entries = readdirSync(dir).filter((name) => name.endsWith(".json"));
-    } catch {
-      continue;
-    }
-    for (const name of entries) {
-      const path = join(dir, name);
-      try {
-        const doc = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
-        const auth = doc["auth"] as Record<string, unknown> | undefined;
-        if (auth === undefined) continue;
-        const token = auth["accessToken"];
-        if (typeof token !== "string" || token === "") continue;
-        const expiresAt = typeof auth["expiresAt"] === "number" ? auth["expiresAt"] * 1000 : undefined;
-        return {
-          source: path,
-          parsed: {
-            kind: "plain",
-            region,
-            token,
-            ...(typeof auth["refreshToken"] === "string" ? { refreshToken: auth["refreshToken"] } : {}),
-            ...(expiresAt === undefined ? {} : { expiresAtMs: expiresAt }),
-          },
-        };
-      } catch {
-        continue;
-      }
-    }
-  }
-  return undefined;
+  const entries = listVaultEntries();
+  const candidates = preferredRegion === undefined ? entries : entries.filter((e) => e.region === preferredRegion);
+  const first = candidates[0];
+  return first === undefined ? undefined : { source: first.source, parsed: first.parsed };
 }

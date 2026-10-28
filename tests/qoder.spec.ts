@@ -379,7 +379,7 @@ describe("live e2e: 经 shim 发一次真实对话", () => {
     const recorded: { model: string; statusCode: number }[] = [];
     const shim = await startShim({
       prepare: async () => ({ baseUrl: "https://unused.invalid", headers: {} }),
-      dialect: createQoderDialect({ session: () => sessions.current() }),
+      dialect: createQoderDialect({ sessionFor: () => sessions.current() }),
       record: (input) => {
         recorded.push({ model: input.model, statusCode: input.statusCode });
       },
@@ -560,7 +560,7 @@ describe("live: 断链历史不再 400", () => {
 
     const shim = await startShim({
       prepare: async () => ({ baseUrl: "https://unused.invalid", headers: {} }),
-      dialect: createQoderDialect({ session: () => sessions.current() }),
+      dialect: createQoderDialect({ sessionFor: () => sessions.current() }),
       record: () => {},
     });
 

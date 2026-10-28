@@ -272,7 +272,7 @@ function applyInner(ctx: any, config: any): void {
           qoderShim = await startShim({            // prepare 在方言模式下不会被用到（URL/头/体全由 dialect.request 决定），
             // 但仍然要实现，因为接口要求。给一个明显的占位地址，误用会立刻炸。
             prepare: async () => ({ baseUrl: "https://qoder.invalid", headers: {} }),
-            dialect: createQoderDialect({ session: () => sessions.current() }),
+            dialect: createQoderDialect({ sessionFor: () => sessions.current() }),
             record: makeRecorder(db, PROVIDER_QODER, () => settings.recordEnabled !== false),
           });
 

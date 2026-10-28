@@ -324,16 +324,19 @@ export function decodeQoderLine(line: string): string | null {
  * 造出 shim 用的方言对象。
  *
  * `request` 负责：拼 Qoder 请求体 → 编码 → COSY 重签名（签名覆盖编码后的字节）。
+ *
+ * `sessionFor` 按本次选中的账号取会话（shim 的 `input.account` 贯通进来）；
+ * `account` 为 undefined 时（调用方还没带账号）由调用方自行落到缺省账号。
  */
 export function createQoderDialect(options: {
-  session: () => Promise<QoderSession | undefined>;
+  sessionFor: (account: { id: string } | undefined) => Promise<QoderSession | undefined>;
   gatewayBase?: string;
 }): ShimDialect {
   const gateway = (options.gatewayBase ?? DEFAULT_GATEWAY).replace(/\/+$/, "");
 
   return {
     async request(input) {
-      const session = await options.session();
+      const session = await options.sessionFor(input.account);
       if (session === undefined) throw new Error("Qoder 凭据不可用（PAT 缺失或交换失败）");
 
       let parsed: Record<string, unknown> = {};

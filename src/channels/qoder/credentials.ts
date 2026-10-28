@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -69,6 +69,32 @@ export function readPat(): { pat: string; source: string } | undefined {
 }
 
 /**
+ * 目录下全部 `.pat` 文件；内容必须 `pt-` 开头才算（坏文件/非 PAT 文件 fail-soft 跳过）。
+ *
+ * 多账号的形态：`<dshHome>/model-hub/qoder-pats/*.pat`，一个文件一个账号。
+ * 目录不存在或读不了返回空数组（不抛）。
+ */
+export function listPatFiles(dir: string): { name: string; pat: string; source: string }[] {
+  let names: string[] = [];
+  try {
+    names = readdirSync(dir).filter((n) => n.endsWith(".pat"));
+  } catch {
+    return [];
+  }
+  const out: { name: string; pat: string; source: string }[] = [];
+  for (const name of names) {
+    const source = join(dir, name);
+    try {
+      const value = readFileSync(source, "utf8").trim();
+      if (value.startsWith("pt-")) out.push({ name, pat: value, source });
+    } catch {
+      /* 跳过读不了的 */
+    }
+  }
+  return out;
+}
+
+/**
  * `expires_at` 可能是 ISO 串、秒级或毫秒级数字；`expires_in` 可能是秒或毫秒。
  * 读不出来就返回 undefined（调用方按保守值处理）。
  */
@@ -86,8 +112,12 @@ export function resolveExpiry(doc: Record<string, unknown>): number | undefined 
   return undefined;
 }
 
-/** 一次 PAT 交换 + userinfo。 */
-async function fetchSession(pat: string, source: string, openapiBase: string): Promise<QoderSession> {
+/** 一次 PAT 交换 + userinfo。多账号场景按 PAT 逐个验活也走这里。 */
+export async function exchangePat(
+  pat: string,
+  source: string,
+  openapiBase: string = DEFAULT_OPENAPI,
+): Promise<QoderSession> {
   const response = await fetch(`${openapiBase}${PATH_EXCHANGE}`, {
     method: "POST",
     headers: {
@@ -162,8 +192,15 @@ async function fetchSession(pat: string, source: string, openapiBase: string): P
  * jobToken 管理器：单飞 + 提前重换。
  *
  * 并发调用只会打一次上游；快过期时自动重换，调用方永远拿到可用的 session。
+ *
+ * `readCredential` 可注入凭据源（多账号时每个账号一个管理器、各指一个 PAT）；
+ * 缺省 `readPat()`，行为与单账号时期完全一致。
  */
-export function createSessionManager(options: { openapiBase?: string; now?: () => number } = {}) {
+export function createSessionManager(options: {
+  openapiBase?: string;
+  now?: () => number;
+  readCredential?: () => { pat: string; source: string } | undefined;
+} = {}) {
   const openapiBase = (options.openapiBase ?? DEFAULT_OPENAPI).replace(/\/+$/, "");
   const now = options.now ?? (() => Date.now());
   let cached: QoderSession | undefined;
@@ -175,10 +212,10 @@ export function createSessionManager(options: { openapiBase?: string; now?: () =
       if (cached !== undefined && cached.expiresAt - now() > SKEW_MS) return cached;
       if (inflight !== undefined) return inflight.catch(() => undefined);
 
-      const found = readPat();
+      const found = options.readCredential?.() ?? readPat();
       if (found === undefined) return undefined;
 
-      inflight = fetchSession(found.pat, found.source, openapiBase)
+      inflight = exchangePat(found.pat, found.source, openapiBase)
         .then((session) => {
           cached = session;
           return session;

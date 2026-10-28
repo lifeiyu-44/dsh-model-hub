@@ -36,8 +36,11 @@ export function softDeleteAccount(db: DatabaseSync, id: string): void {
   db.exec("BEGIN");
   try {
     db.prepare("UPDATE accounts SET deleted = 1, enabled = 0, is_current = 0 WHERE id = ?").run(id);
+    // 晋升条件与选择器的 poolOf 同口径（deleted=0 ∧ enabled=1 ∧ 有凭据）：
+    // 把「当前」徽标给一个永远进不了池的缺凭据账号，面板等于在撒谎
+    // （终审 M3）。没有合格继任者就让它空缺 —— pickOf 本就按池序兜底。
     const next = db.prepare(
-      "SELECT id FROM accounts WHERE channel_id = ? AND deleted = 0 AND enabled = 1 ORDER BY last_ok_at DESC, created_at ASC LIMIT 1",
+      "SELECT id FROM accounts WHERE channel_id = ? AND deleted = 0 AND enabled = 1 AND credential_ref IS NOT NULL AND credential_ref <> '' ORDER BY last_ok_at DESC, created_at ASC LIMIT 1",
     ).get(row.channel_id) as { id: string } | undefined;
     if (next !== undefined) {
       db.prepare("UPDATE accounts SET is_current = 1 WHERE id = ?").run(next.id);

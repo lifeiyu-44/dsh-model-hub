@@ -34,18 +34,34 @@ it("软删后 queryAccounts 不再返回，且 seed 不复活它", async () => {
   expect(raw.deleted).toBe(1);
 });
 
-it("makeCurrent 在渠道内唯一；软删当前账号自动晋升", async () => {
+it("makeCurrent 在渠道内唯一；软删当前账号自动晋升（继任者有凭据）", async () => {
   const db = await tempDb();
   seedChannelsAndAccounts(db,
     [{ id: "c", kind: "qoder", displayName: "C" }],
-    [{ id: "a1", channelId: "c", displayName: "A1", isCurrent: true },
-     { id: "a2", channelId: "c", displayName: "A2" }]);
+    [{ id: "a1", channelId: "c", displayName: "A1", credentialRef: "~/.dsh/qoder/pat", isCurrent: true },
+     { id: "a2", channelId: "c", displayName: "A2", credentialRef: "~/.dsh/qoder/pat2" }]);
   makeCurrent(db, "c", "a2");
   const rows = queryAccounts(db);
   expect(rows.find((r: any) => r.id === "a1").is_current).toBe(0);
   expect(rows.find((r: any) => r.id === "a2").is_current).toBe(1);
   softDeleteAccount(db, "a2");
   expect(queryAccounts(db).find((r: any) => r.id === "a1").is_current).toBe(1);
+});
+
+it("软删当前账号：无凭据的继任者不晋升（池口径要求 has_credential）", async () => {
+  // 面板的「当前」徽标指向一个永远进不了池（缺凭据）的账号会误导用户，
+  // 晋升条件必须与 poolOf 同口径：deleted=0 ∧ enabled=1 ∧ 有凭据。
+  const db = await tempDb();
+  seedChannelsAndAccounts(db,
+    [{ id: "c", kind: "qoder", displayName: "C" }],
+    [{ id: "a1", channelId: "c", displayName: "A1" }, // 没有 credential_ref
+     { id: "a2", channelId: "c", displayName: "A2", credentialRef: "~/.dsh/qoder/pat", isCurrent: true }]);
+  softDeleteAccount(db, "a2");
+  const rows = queryAccounts(db);
+  expect(rows.find((r: any) => r.id === "a1").is_current).toBe(0); // 不晋升
+  expect(rows.find((r: any) => r.id === "a1").enabled).toBe(1); // 本身没被动过
+  const raw = db.prepare("SELECT is_current FROM accounts WHERE id='a2'").get() as any;
+  expect(raw.is_current).toBe(0); // 被删者自身也置 0
 });
 
 it("markAccountResult：成功清零并记 last_ok_at；凭据类失败 3 次进冷却", async () => {

@@ -169,22 +169,31 @@ function applyInner(ctx: any, config: any): void {
       }
       // runtime（shim + 拉目录 + 上架 adapter）由 state 统一建：目录/凭据问题
       // 在 hub-state 里折成 error 日志并保持「无 runtime」，不会炸这里。
-      await state.ensureRuntime(PROVIDER_GLOBAL);
-      if (workbuddyShimUrl === undefined) {
-        // 有凭据但 runtime 没起来：必须留一份 ok:false 的 status.json。
-        // deploy.ps1 对「文件缺失」按『可能没有凭据』放行，而旧代码同场景
-        // 会写 ok:false 让部署自检当场抛错 —— P0 建立的自检不能在它针对的
-        // 场景里静默假通过（审查发现 2）。workbuddyShimUrl 由 runtimeFactory
-        // 闭包在 factory 成功返回时设置：seed 刚成功（渠道在、池非空），
-        // 它是 undefined 就只能是 factory 失败，信号可靠。
-        await writeStatus(ctx, {
-          ok: false,
-          provider: PROVIDER_GLOBAL,
-          modelCount: 0,
-          modelIds: [],
-          catalogCount: 0,
-          error: "WorkBuddy runtime 启动失败（目录拉取或凭据现读失败，详见插件日志）",
-        });
+      // 池空（用户删光/停光所有账号）是用户自己的选择，不算部署事故：
+      // 跳过 ensureRuntime，也**不写** status.json ok:false —— 写了反而让
+      // deploy.ps1 的自检把一次正常的使用状态误报成部署失败（终审 M2）。
+      if (state.poolSize(PROVIDER_GLOBAL) > 0) {
+        await state.ensureRuntime(PROVIDER_GLOBAL);
+        if (workbuddyShimUrl === undefined) {
+          // 有凭据但 runtime 没起来：必须留一份 ok:false 的 status.json。
+          // deploy.ps1 对「文件缺失」按『可能没有凭据』放行，而旧代码同场景
+          // 会写 ok:false 让部署自检当场抛错 —— P0 建立的自检不能在它针对的
+          // 场景里静默假通过（审查发现 2）。workbuddyShimUrl 由 runtimeFactory
+          // 闭包在 factory 成功返回时设置：seed 刚成功（渠道在、池非空），
+          // 它是 undefined 就只能是 factory 失败，信号可靠。
+          await writeStatus(ctx, {
+            ok: false,
+            provider: PROVIDER_GLOBAL,
+            modelCount: 0,
+            modelIds: [],
+            catalogCount: 0,
+            error: "WorkBuddy runtime 启动失败（目录拉取或凭据现读失败，详见插件日志）",
+          });
+        }
+      } else {
+        ctx.logger?.warn?.(
+          "dsh-model-hub: WorkBuddy 渠道没有可用账号（已被删除或停用），跳过 runtime —— 面板可重新添加",
+        );
       }
     }
 

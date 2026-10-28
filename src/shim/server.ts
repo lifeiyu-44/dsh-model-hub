@@ -152,10 +152,11 @@ export async function startShim(deps: ShimDeps): Promise<ShimHandle> {
       // shim 这一层做 —— 这是最后一个能看到并改写请求体的地方。
       const body = applyDefaultReasoning(ensureSystemHead(raw));
 
-      // 凭据类失败（401/402/403/429）时在请求内换号重试：此刻还没向客户端
-      // 发出任何字节，静默换个账号再打，客户端只看到最终结果。
+      // 凭据类失败（401/402/403/429）与 5xx 时在请求内换号重试：此刻还没向
+      // 客户端发出任何字节，静默换个账号再打，客户端只看到最终结果。
       // maxAttempts 缺省 1 = 不换号，旧渠道零影响；400 等非凭据类失败不在
       // 换号之列（那是请求本身的问题，多打几个账号也是浪费）。
+      // 5xx 换号但不计熔断 —— 熔断过滤在 markAccountResult 的 isCredentialFailure。
       const maxAttempts = Math.max(1, deps.maxAttempts?.() ?? 1);
       for (let attempt = 1; attempt <= maxAttempts; attempt++) {
         const prepared = await deps.prepare();
@@ -197,7 +198,13 @@ export async function startShim(deps: ShimDeps): Promise<ShimHandle> {
           if (attempt < maxAttempts) continue;
           throw networkError;
         }
-        const failover = resp.status === 401 || resp.status === 402 || resp.status === 403 || resp.status === 429;
+        // 换号条件：凭据类（401/402/403/429）或 5xx（500-599）；400 不换号。
+        const failover =
+          resp.status === 401 ||
+          resp.status === 402 ||
+          resp.status === 403 ||
+          resp.status === 429 ||
+          (resp.status >= 500 && resp.status <= 599);
         if (failover && attempt < maxAttempts) {
           deps.onAccountResult?.(prepared.account ?? { id: "" }, false, resp.status);
           // 响应体不打算读就要 cancel 掉，否则连接挂着不回收。

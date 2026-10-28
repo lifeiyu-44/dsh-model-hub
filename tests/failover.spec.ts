@@ -124,4 +124,50 @@ describe("shim 换号重试", () => {
       up.close();
     }
   });
+
+  it("5xx 也换号：首账号 502 → 次账号 200（不计熔断口径）", async () => {
+    const authSeen: string[] = [];
+    const up = upstreamReturning((n) => (n === 1 ? 502 : 200), authSeen);
+    const port = await listen(up);
+
+    const accounts = ["a1", "a2"];
+    let pick = 0;
+    const results: any[] = [];
+    const shim = await startShim({
+      prepare: async () => ({
+        baseUrl: `http://127.0.0.1:${port}`,
+        headers: { authorization: `Bearer ${accounts[pick]}` },
+        account: { id: accounts[pick] },
+      }),
+      maxAttempts: () => 3,
+      onAccountResult: (account, ok, status) => {
+        results.push({ id: account.id, ok, status });
+        if (!ok) pick = Math.min(pick + 1, accounts.length - 1);
+      },
+      record: () => {},
+    });
+
+    try {
+      const res = await fetch(`${shim.baseUrl()}/v1/x`, {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${shim.token()}`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ model: "m" }),
+      });
+      expect(res.status).toBe(200);
+      expect(authSeen).toEqual(["Bearer a1", "Bearer a2"]); // 5xx 也换了一次号
+      // shim 如实上报 502 为失败；「不计熔断」由 markAccountResult 的
+      // isCredentialFailure(502)=false 保证（见 tests/mutations.spec.ts）。
+      expect(results).toEqual([
+        { id: "a1", ok: false, status: 502 },
+        { id: "a2", ok: true, status: 200 },
+      ]);
+      await res.text();
+    } finally {
+      shim.close();
+      up.close();
+    }
+  });
 });

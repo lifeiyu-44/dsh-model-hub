@@ -122,6 +122,9 @@ ALTER TABLE accounts ADD COLUMN cooldown_until INTEGER;
 `make-current` / `toggle` / `delete` 若使渠道「可用账号数 0 ↔ >0」翻转，
 runtime 层同步 release / 重注册 adapter（模型从选择器消失或恢复；shim 不动）。
 
+已接受风险：5xx 触发的请求内换号对非幂等上游有重复副作用的理论可能（上限
+`min(池,3)`、客户端只收一次响应），终审裁定接受。
+
 ## 7. 热注册与一键认证
 
 **ensureChannelRuntime(channelId)**（幂等）：建 shim（prepare 绑 selector）→

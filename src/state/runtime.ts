@@ -398,9 +398,21 @@ export async function startChannelRuntime(deps: ChannelRuntimeDeps): Promise<Run
   // 地址/密钥绑进 adapter；测试在 deps.registerAdapter 传 fake。
   const registerAdapter = deps.registerAdapter ?? createRegisterAdapter(shim);
 
-  models = await fetchCatalogForHead();
-  panelEntries = toPanelEntries(models);
-  register();
+  try {
+    models = await fetchCatalogForHead();
+    panelEntries = toPanelEntries(models);
+    register();
+  } catch (error) {
+    // 目录拉取/凭据现读抛错时，ensureRuntimeCore 会把它折成日志并保持
+    // 「无 runtime」—— 但 shim 已经在监听。不就地关掉，这个端口就无人引用、
+    // 永不释放，面板每次重试（重进 factory）再泄一个（审查发现 1）。
+    try {
+      shim.close();
+    } catch (closeError) {
+      logger.warn?.(`dsh-model-hub: ${channelId} shim 关闭失败（忽略）`, closeError);
+    }
+    throw error;
+  }
 
   return {
     shim,

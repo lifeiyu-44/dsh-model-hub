@@ -1,5 +1,6 @@
 import { expect, it, vi } from "vitest";
 import { mkdtempSync, writeFileSync } from "node:fs";
+import * as http from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { openHubDatabase } from "../src/store/db.js";
@@ -81,6 +82,53 @@ it("空目录起步拒上架；refresh 拉到非空后自动上架（wasEmpty �
     expect(handle.panelEntries.map((e) => e.id)).toEqual(["m1"]);
   } finally {
     handle?.shim.close();
+    vi.unstubAllGlobals();
+  }
+});
+
+it("目录拉取抛错 → 错误上抛且 shim 已就地关闭（不泄漏监听端口）", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "rt-leak-"));
+  const authPath = join(dir, "auth.info");
+  writeFileSync(
+    authPath,
+    JSON.stringify({ auth: { accessToken: "test-token", domain: "www.workbuddy.ai" } }),
+    "utf8",
+  );
+
+  const db = await openHubDatabase(join(dir, "hub.db"));
+  seedChannelsAndAccounts(
+    db,
+    [{ id: "c", kind: "workbuddy", displayName: "C" }],
+    [{ id: "a1", channelId: "c", displayName: "A1", credentialRef: authPath, isCurrent: true }],
+  );
+
+  // shim.close 落在 http.Server.prototype.close 上（shim/server.ts）——
+  // spy 透传真实现，闭不闭一目了然
+  const closeSpy = vi.spyOn(http.Server.prototype, "close");
+  vi.stubGlobal(
+    "fetch",
+    (async () => {
+      throw new Error("catalog down");
+    }) as unknown as typeof fetch,
+  );
+  try {
+    // 调用方（hub-state.ensureRuntimeCore）拿到抛错后折成日志保持「无 runtime」；
+    // 已经在监听的 shim 必须在抛出前就地关闭，否则端口无人引用、每次重试再泄一个
+    await expect(
+      startChannelRuntime({
+        db,
+        channelId: "c",
+        kind: "workbuddy",
+        settings: () => ({}),
+        state: { pick: () => ROW, poolSize: () => 1, reportResult: () => {} },
+        logger: {},
+        ctx: {},
+        registerAdapter: () => () => {},
+      }),
+    ).rejects.toThrow("catalog down");
+    expect(closeSpy).toHaveBeenCalled();
+  } finally {
+    closeSpy.mockRestore();
     vi.unstubAllGlobals();
   }
 });

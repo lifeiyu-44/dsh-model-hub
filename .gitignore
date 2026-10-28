@@ -3,6 +3,10 @@ lib/
 *.log
 .DS_Store
 
+# 构建产物：client.js 由 tsdown 生成（lib/.client/client-impl.cjs + 外壳），
+# 与 lib/ 同理不进仓库。
+client.js
+
 # 部署脚本每次运行都会在 backup/ 下留一份 profile 快照（含本机路径与
 # 别人的插件配置），那是本机运行产物，不进仓库。
 backup/

@@ -11,6 +11,7 @@ import { detectCredential } from "./channels/workbuddy/auth.js";
 import { readWorkbuddyVault } from "./channels/workbuddy/vault.js";
 import { fetchCatalog, upstreamBase, conversationIdentityHeaders } from "./channels/workbuddy/catalog.js";
 import { createHubAdapter } from "./provider.js";
+import { registerDataRoutes } from "./routes/data.js";
 
 export const name = "dsh-model-hub";
 export { Config };
@@ -141,17 +142,16 @@ function applyInner(ctx: any, config: any): void {
       db.close();
     }, "dsh-model-hub: teardown");
 
-    // P0 不注册任何 HTTP 路由。
+    // 面板数据路由。
     //
-    // 教训：`ctx.webServer` 的属性访问由插件的**静态** `inject` 数组把关，
-    // `ctx.inject(["webServer"], cb)` 只控制回调何时运行、**不授予属性访问权**。
-    // 在 `inject` 只有 `llm` 的情况下摸 `ctx.webServer` 会抛
-    // `cannot get property "webServer" without inject`，而该错误发生在加载期，
+    // 教训：`ctx.webServer` 的属性访问由插件的**静态** `inject` 数组把关 ——
+    // 但正确写法不是把它加进静态 inject，而是走 `ctx.inject(["webServer"], cb)`，
+    // **回调收到的那个 ctx** 才带着 webServer。在外层 ctx 上直接摸仍会抛
+    // `cannot get property "webServer" without inject`，那是加载期异常，
     // 会让整个 host `exit 1`，进而触发 DSH 把 profile 重置为默认
     // （bundles 清空、cordis.patch.yml 被覆盖）—— 实测踩过两次。
-    //
-    // 记录查询路由属于 P2 的面板功能，等真正做 UI 时再连同 `inject` 声明一起加。
-    // P0 的验证手段是直接读 SQLite，不需要 HTTP 接口。
+    // 两种写法的差异由 tests/webserver-access.spec.ts 用真实 Cordis 定死。
+    registerDataRoutes(ctx, { db });
 
     ctx.logger?.info?.(
       `dsh-model-hub: 已注册 ${PROVIDER_GLOBAL}（${models.length} 个模型），shim=${shim.baseUrl()}`,

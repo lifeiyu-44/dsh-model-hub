@@ -61,13 +61,43 @@ function Build-Plugin {
     $size = (Get-Item $entry).Length
     Write-Ok "lib/index.js ${size} 字节"
 
-    # 已知会导致 fatal 的标记：这些字符串出现在产物里说明跑的是坏版本
-    $bad = @('registerRecordsRoute', 'ctx.webServer')
+    # 已知会导致 fatal 的标记。
+    #
+    # 注意 `ctx.webServer` 的判定要区分「代码」与「注释」：
+    # 本项目现在**合法地**在 `ctx.inject(["webServer"], cb)` 的回调里用
+    # `inner.webServer.register(...)`，注释里也会提到 `ctx.webServer`。
+    # 真正危险的是「在回调外直接访问外层 ctx 的 webServer」，
+    # 所以这里查的是代码形态而不是字符串出现。
     $text = Get-Content $entry -Raw
-    foreach ($marker in $bad) {
-      if ($text.Contains($marker)) { throw "产物里仍含危险标记 '$marker' —— 拒绝继续" }
+
+    if ($text.Contains('registerRecordsRoute')) {
+      throw "产物里仍含危险标记 'registerRecordsRoute' —— 拒绝继续"
+    }
+
+    # 外层 ctx 直接摸 webServer（形如 `ctx.webServer` 后面紧跟 `.` 或 `;`，
+    # 且不在 `inner.` / `innerCtx.` 这类回调 ctx 上）。
+    if ($text -match '(?<![\w.$])ctx\.webServer\s*[.;]') {
+      throw "产物里存在外层 ctx 直接访问 webServer 的代码 —— 会 fatal，拒绝继续"
     }
     Write-Ok '无危险标记'
+
+    # 客户端产物检查：有 dsh.client 声明就必须有 client.js，反之亦然。
+    $clientFile = Join-Path $ProjectDir 'client.js'
+    $pkgText = Get-Content (Join-Path $ProjectDir 'package.json') -Raw -Encoding UTF8
+    $declaresClient = $pkgText.Contains('"client"')
+    if ($declaresClient -and -not (Test-Path $clientFile)) {
+      throw "package.json 声明了 dsh.client，但 client.js 不存在"
+    }
+    if ((Test-Path $clientFile) -and -not $declaresClient) {
+      throw "存在 client.js，但 package.json 没有 dsh.client 声明 —— 宿主不会加载它"
+    }
+    if (Test-Path $clientFile) {
+      $clientText = Get-Content $clientFile -Raw
+      if (-not $clientText.Contains('__ModuleLoader__')) {
+        throw "client.js 缺少 __ModuleLoader__ 外壳 —— 宿主加载不了"
+      }
+      Write-Ok "client.js $((Get-Item $clientFile).Length) 字节，外壳正常"
+    }
   } finally { Pop-Location }
 }
 
@@ -86,7 +116,37 @@ function Sync-ToDesktopCopy {
   $before = (Get-Item (Join-Path $dstLib 'index.js')).Length
   $after = (Get-Item (Join-Path $ProjectDir 'lib\index.js')).Length
   if ($before -ne $after) { throw "同步后大小不一致：profile=$before source=$after" }
-  Write-Ok "已同步，两边都是 $before 字节"
+  Write-Ok "lib 已同步，两边都是 $before 字节"
+
+  # client.js 必须一起同步，而且位置是**包根目录**。
+  # 宿主的 manifest 把客户端插件拼成 `<包名>/client.js`
+  # （见 index.html 的 __DSH_BOOT__.entries），放 lib/ 里宿主找不到。
+  $srcClient = Join-Path $ProjectDir 'client.js'
+  if (Test-Path $srcClient) {
+    $dstClient = Join-Path $dst 'client.js'
+    Copy-Item $srcClient $dstClient -Force
+    $cb = (Get-Item $dstClient).Length
+    $ca = (Get-Item $srcClient).Length
+    if ($cb -ne $ca) { throw "client.js 同步后大小不一致：profile=$cb source=$ca" }
+    Write-Ok "client.js 已同步，两边都是 $cb 字节"
+  } else {
+    Write-Note 'client.js 不存在（未构建客户端），跳过'
+  }
+
+  # package.json 也要同步：dsh.client 声明在里面，少了它宿主不会加载客户端。
+  $srcPkg = Join-Path $ProjectDir 'package.json'
+  $dstPkg = Join-Path $dst 'package.json'
+  if ((Test-Path $srcPkg) -and (Test-Path $dstPkg)) {
+    $srcJson = Get-Content $srcPkg -Raw -Encoding UTF8
+    $dstJson = Get-Content $dstPkg -Raw -Encoding UTF8
+    if ($srcJson -ne $dstJson) {
+      # 无 BOM —— DSH 用 JSON.parse 读这个文件，BOM 会让它语法错误
+      [System.IO.File]::WriteAllText($dstPkg, $srcJson, (New-Object System.Text.UTF8Encoding($false)))
+      Write-Ok 'package.json 已同步（dsh.client 声明）'
+    } else {
+      Write-Ok 'package.json 已是最新'
+    }
+  }
 }
 
 # ─────────────── 步骤 3：临时 profile 真机验证 ───────────────
@@ -184,6 +244,57 @@ function Verify-InTempProfile {
     } else {
       Write-Note "未找到状态文件 $statusPath —— 可能没有可用凭据，跳过自检"
     }
+
+    # ── 步骤 3c：查客户端是否进了 boot manifest ──
+    #
+    # 光有 client.js 文件不算数：宿主是从 index.html 的
+    # `__DSH_BOOT__.entries` 里发现客户端插件的。文件在、但没进 manifest，
+    # UI 一样不会出现 —— 而「宿主起得来」这个检查对此完全无感。
+    #
+    # 这里直接抓验证宿主自己的 index.html，解析 manifest，确认插件在里面。
+    # 不依赖 cookie：manifest 在页面 HTML 里，而该 profile 是新建的临时 profile。
+    $manifestOk = $false
+    try {
+      # 临时 profile 没有 client-connection 的凭据，直接读 index.html 会 401。
+      # 所以退一步：验证 host 侧已经把它当客户端包登记了（有 exports["./client"]
+      # 且文件存在），这一步至少能挡住「声明了但没导出」这类错误。
+      #
+      # 注意：PS 5.1 的 ConvertFrom-Json 对深嵌套有兼容问题（实测在
+      # exports 里抛 "Invalid object passed in"），这里改用 node 解析 ——
+      # pnpm 的 node 在 PATH 里，且 JSON 本来就是 JS 的强项。
+      $pkgPath = Join-Path $VerifyDir "node_modules\$PluginName\package.json"
+      $clientPath = Join-Path $VerifyDir "node_modules\$PluginName\client.js"
+      $probe = @"
+const fs = require('fs');
+const pkg = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
+process.stdout.write(JSON.stringify({
+  hasClientDecl: !!(pkg.dsh && pkg.dsh.client),
+  hasClientExport: !!(pkg.exports && pkg.exports['./client']),
+  clientExists: fs.existsSync(process.argv[3]),
+}));
+"@
+      $probeFile = Join-Path $env:TEMP "hub-pkg-probe-$([guid]::NewGuid().ToString('N')).cjs"
+      [System.IO.File]::WriteAllText($probeFile, $probe, (New-Object System.Text.UTF8Encoding($false)))
+      try {
+        $json = (& node $probeFile $pkgPath $clientPath) -join ''
+      } finally {
+        Remove-Item $probeFile -Force -ErrorAction SilentlyContinue
+      }
+      $facts = $json | ConvertFrom-Json
+
+      if ($facts.hasClientDecl -and $facts.hasClientExport -and $facts.clientExists) {
+        $manifestOk = $true
+        Write-Ok "客户端包已就位（dsh.client + exports['./client'] + client.js）"
+      } elseif ($facts.hasClientDecl) {
+        throw "声明了 dsh.client，但缺少 exports['./client'] 或 client.js"
+      } else {
+        Write-Note '未声明 dsh.client（纯 host 插件），跳过客户端检查'
+        $manifestOk = $true
+      }
+    } catch {
+      throw "客户端包检查失败：$($_.Exception.Message)"
+    }
+    if (-not $manifestOk) { throw '客户端包未就位' }
   } finally {
     if (-not $proc.HasExited) {
       Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue

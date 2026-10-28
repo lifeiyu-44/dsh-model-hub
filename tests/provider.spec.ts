@@ -81,24 +81,56 @@ describe("createHubAdapter —— 产出的 provider 必须真的能出模型", 
 });
 
 describe("思考档位表", () => {
+  /**
+   * `resolveModel` 返回的是宿主投影（provider/id/name/context/reasoning），
+   * 不携带 `thinkingLevelMap` / `compat` —— 这两个字段承载在发请求时真正
+   * 用的 pi 模型对象上（openai-completions 直接读 `model.thinkingLevelMap`
+   * 与 `model.compat.supportsReasoningEffort`）。所以断言必须打到生产组装
+   * （`createHubAdapter` → pi-ai `createProvider`）产出的 piProvider 模型表，
+   * 这里用同款注入把 piProvider 截下来，对真对象断言。
+   */
+  function hubWithCapturedPi(models: HubModel[]) {
+    let piProvider: any;
+    const adapter = createHubAdapter({
+      provider: PROVIDER,
+      shimBaseUrl: SHIM,
+      shimToken: SHIM_TOKEN,
+      models,
+      createProvider: (input: any) => (piProvider = createProvider(input)),
+      openAICompletionsApi,
+      resolveRetryPolicy,
+      PiAiAdapter,
+    });
+    const piModelOf = (id: string) => piProvider.getModels().find((m: any) => m.id === id);
+    return { adapter, piModelOf };
+  }
+
   it("reasoning 模型带 thinkingLevelMap 与 compat.supportsReasoningEffort", async () => {
     const models: HubModel[] = [
       { id: "qfmodel", name: "Q", contextWindow: 1_000_000, maxTokens: 32_000, creditMultiplier: 0, supportsImages: false, reasoning: true },
     ];
-    const model = (await adapterFor(models).resolveModel(PROVIDER, "qfmodel")) as any;
+    const { adapter, piModelOf } = hubWithCapturedPi(models);
+    const model = (await adapter.resolveModel(PROVIDER, "qfmodel")) as any;
     expect(model).toBeDefined();
-    console.log("[dbg] reasoning =", JSON.stringify(model.reasoning));
     expect(model.reasoning).toBeTruthy();
+    // 用例名里的两个核心交付必须有真断言，否则整段实现删掉测试也照样绿。
+    const piModel = piModelOf("qfmodel");
+    expect(piModel?.thinkingLevelMap?.high).toBe("high");
+    expect(piModel?.compat?.supportsReasoningEffort).toBe(true);
   });
 
   it("非 reasoning 模型不带档位表", async () => {
     const models: HubModel[] = [
       { id: "m", name: "M", contextWindow: 100_000, maxTokens: 8_000, creditMultiplier: 1, supportsImages: false },
     ];
-    const model = (await adapterFor(models).resolveModel(PROVIDER, "m")) as any;
+    const { adapter, piModelOf } = hubWithCapturedPi(models);
+    const model = (await adapter.resolveModel(PROVIDER, "m")) as any;
     expect(model).toBeDefined();
     expect(model.reasoning ?? false).toBeFalsy();
-    expect(model.thinkingLevelMap).toBeUndefined();
-    expect(model.compat?.supportsReasoningEffort).toBeFalsy();
+    // 投影上本来就不带这两个字段（对 reasoning 模型也一样），
+    // 「不带」的真断言同样要打在 pi 模型对象上。
+    const piModel = piModelOf("m");
+    expect(piModel?.thinkingLevelMap).toBeUndefined();
+    expect(piModel?.compat).toBeUndefined();
   });
 });

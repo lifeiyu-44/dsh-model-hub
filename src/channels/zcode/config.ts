@@ -57,11 +57,38 @@ export function zcodeConfigPath(): string {
  * 已知 template 的兜底地址。
  *
  * 只收录**能确定**的：DeepSeek 官方 OpenAI 兼容端点是公开信息。
- * 其它 template 缺 baseUrl 时一律跳过，不猜。
+ * 注意末尾带 `/v1` —— OpenAI SDK 自己接 `/chat/completions`。
  */
 const TEMPLATE_DEFAULTS: Record<string, { baseUrl: string; api: ZcodeProvider["api"] }> = {
-  deepseek: { baseUrl: "https://api.deepseek.com", api: "openai-completions" },
+  deepseek: { baseUrl: "https://api.deepseek.com/v1", api: "openai-completions" },
 };
+
+/**
+ * 规整 baseUrl，对齐 pi-ai 的 SDK 语义。
+ *
+ * pi-ai 用官方 SDK，`baseURL` 是**给 SDK 的前缀**，SDK 自己接上端点路径：
+ * - OpenAI SDK    -> `${baseURL}/chat/completions`，所以 baseUrl 要以版本段结尾
+ * - Anthropic SDK -> `${baseURL}/v1/messages`，所以 baseUrl **不能**再带 `/v1`
+ *
+ * ZCode 配置里的地址是按「完整端点前缀」写的（`…/v1`、`…/strata/v1`），
+ * 直接喂给 Anthropic SDK 就成了 `/v1/v1/messages` —— 实测 404 的根因。
+ */
+export function normalizeBaseUrl(baseUrl: string, api: ZcodeProvider["api"]): string {
+  const trimmed = baseUrl.replace(/\/+$/, "");
+  if (api === "anthropic-messages") return trimmed.replace(/\/v1$/i, "");
+  return /\/v\d+$/i.test(trimmed) ? trimmed : `${trimmed}/v1`;
+}
+
+/**
+ * 推断协议。
+ *
+ * ZCode 的 `api.type` 经常缺（DeepSeek 整块 api 都没有），只能靠地址特征兜底：
+ * 路径里带 `anthropic` 的走 anthropic-messages，其余按 OpenAI 兼容处理。
+ */
+export function inferApi(declared: string | undefined, baseUrl: string): ZcodeProvider["api"] {
+  if (declared === "anthropic-messages" || declared === "openai-completions") return declared;
+  return /anthropic/i.test(baseUrl) ? "anthropic-messages" : "openai-completions";
+}
 
 /** 把任意名字变成稳定的路由片段。 */
 function slugOf(value: string): string {
@@ -149,24 +176,32 @@ export function readZcodeProviders(path = zcodeConfigPath()): ZcodeReadResult {
     const api = asRecord(config["api"]);
     const templateId = asString(rule["templateId"]);
 
+    // 只接 **ZCode 官方模板**（有 templateId 的那些）。
+    //
+    // 用户明确要求「只需要官方的，其他的不管」：没有 templateId 的是自己加的
+    // 第三方端点（内网网关、别人搭的中转），地址与协议都不受 ZCode 维护，
+    // 接进来只会带来 404 与误报。跳过并说明原因，不静默丢。
+    if (templateId === undefined) {
+      skipped.push({ name, reason: "非 ZCode 官方模板（无 templateId），按要求不接入" });
+      continue;
+    }
+
     const apiKey = asString(access?.["apiKey"]);
     if (apiKey === undefined) {
       skipped.push({ name, reason: "没有 api-key（走账号授权，本插件不支持）" });
       continue;
     }
 
-    const fallback = templateId === undefined ? undefined : TEMPLATE_DEFAULTS[templateId];
-    const baseUrl = asString(api?.["baseUrl"]) ?? fallback?.baseUrl;
-    if (baseUrl === undefined) {
+    const fallback = TEMPLATE_DEFAULTS[templateId];
+    const rawBaseUrl = asString(api?.["baseUrl"]) ?? fallback?.baseUrl;
+    if (rawBaseUrl === undefined) {
       skipped.push({ name, reason: "缺少 baseUrl 且没有已知的 template 兜底" });
       continue;
     }
 
-    const declaredApi = asString(api?.["type"]);
-    const resolvedApi: ZcodeProvider["api"] =
-      declaredApi === "anthropic-messages" || declaredApi === "openai-completions"
-        ? declaredApi
-        : (fallback?.api ?? "openai-completions");
+    const declaredApi = asString(api?.["type"]) ?? fallback?.api;
+    const resolvedApi = inferApi(declaredApi, rawBaseUrl);
+    const baseUrl = normalizeBaseUrl(rawBaseUrl, resolvedApi);
 
     const modelIds = collectModelIds(config);
     if (modelIds.length === 0) {

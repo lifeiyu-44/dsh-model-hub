@@ -65,6 +65,38 @@ describe("client.js 能被宿主的 loader 加载", () => {
     expect(typeof loaded.apply).toBe("function");
   });
 
+  /**
+   * 回归锚点：inject 少声明会**打不开模型选择器**。
+   *
+   * 实测事故（2026-10-28）：`inject` 只有 `["slots"]` 时，插件能加载、
+   * 卡片能渲染，但模型选择器报
+   * `cannot get property "remote.session" without inject`。
+   * 因为宿主渲染设置卡片的路径要 `remote.session`（来自 dsh-api-remotes）。
+   */
+  it("声明了渲染路径需要的服务（remote / locale）", () => {
+    expect(loaded.inject).toContain("remote");
+    expect(loaded.inject).toContain("locale");
+  });
+
+  it("package.json 的 dsh.client.inject 与客户端实际声明一致", () => {
+    const pkg = JSON.parse(readFileSync(join(ROOT, "package.json"), "utf8"));
+    const declared: string[] = pkg.dsh?.client?.inject ?? [];
+
+    // 宿主包名 -> 运行时服务名
+    const serviceOf: Record<string, string> = {
+      "@deepseek-ai/dsh-api-remotes": "remote",
+      "@deepseek-ai/dsh-client-locale": "locale",
+      "@deepseek-ai/dsh-client-ui-slots": "slots",
+    };
+
+    for (const [pkgName, service] of Object.entries(serviceOf)) {
+      if (!declared.includes(pkgName)) continue;
+      expect(loaded.inject, `${pkgName} 声明了但客户端 inject 里没有 ${service}`).toContain(service);
+    }
+    if (loaded.inject.includes("remote")) expect(declared).toContain("@deepseek-ai/dsh-api-remotes");
+    if (loaded.inject.includes("locale")) expect(declared).toContain("@deepseek-ai/dsh-client-locale");
+  });
+
   it("apply 不抛，并注册了预期的 slot", () => {
     const ctx = {
       slots: {

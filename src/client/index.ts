@@ -26,8 +26,23 @@ const h = React.createElement;
 
 export const name = "dsh-model-hub-client";
 
-/** 依赖的客户端服务。缺任何一个，`apply` 都不会被调用（Cordis 会等）。 */
-export const inject = ["slots"];
+/**
+ * 依赖的客户端服务。
+ *
+ * **必须与 package.json 的 `dsh.client.inject` 语义一致。**
+ *
+ * 实测事故（2026-10-28）：这里只写了 `slots`，插件能加载、卡片能渲染，
+ * 但**模型选择器打不开** —— 报
+ * `cannot get property "remote.session" without inject`。
+ *
+ * 原因：宿主渲染设置卡片时会走 `directoryFor()`，那条路径需要
+ * `@deepseek-ai/dsh-api-remotes` 提供的 `remote.session`。
+ * 我们的插件没声明它，注入守卫就在**我们的上下文里**抛了 ——
+ * 而宿主把这个异常冒到了模型选择器的渲染路径上。
+ *
+ * 教训：除了自己直接用的 `slots`，还要声明宿主渲染路径上会经过的服务。
+ */
+export const inject = ["slots", "locale", "remote"];
 
 export function apply(ctx: any): void {
   try {

@@ -6,8 +6,18 @@ import { applyDefaultReasoning, ensureSystemHead } from "./prepare.js";
 import { recordRejected } from "./diagnostics.js";
 
 export interface ShimDeps {
-  /** 上游地址与请求头，由渠道后端提供。 */
-  prepare(): Promise<{ baseUrl: string; headers: Record<string, string> }>;
+  /** 上游地址与请求头（可带本次选中的账号），由渠道后端提供。 */
+  prepare(): Promise<{ baseUrl: string; headers: Record<string, string>; account?: { id: string } }>;
+  /**
+   * 可选：单次请求内最多尝试几个账号。缺省 1 = 不换号，旧渠道零影响。
+   * 换号只发生在凭据类失败（401/402/403/429）且尚未向客户端发出任何字节时。
+   */
+  maxAttempts?(): number;
+  /**
+   * 可选：把某个账号本次尝试的结局交给渠道后端（驱动熔断计数与最近成功时间）。
+   * 成功也要报 —— 渠道侧靠 ok=true 复位连续失败计数。
+   */
+  onAccountResult?(account: { id: string }, ok: boolean, status?: number, error?: string): void;
   /**
    * 可选：协议方言。
    *
@@ -23,6 +33,8 @@ export interface ShimDeps {
     error?: string;
     isStreaming: boolean;
     model: string;
+    /** 本次请求最终采用的账号；渠道没给 account 时为 undefined。 */
+    accountId?: string;
   }): void;
 }
 
@@ -37,6 +49,8 @@ export interface ShimDialect {
     model: string;
     baseUrl: string;
     headers: Record<string, string>;
+    /** 本次选中的账号；Qoder 方言靠它取对应账号的会话。 */
+    account?: { id: string };
   }): Promise<{ url: string; headers: Record<string, string>; body: string | Buffer }>;
   /**
    * 把上游的一行 SSE 翻成标准 OpenAI SSE 行；返回 `null` 表示丢弃这一行。
@@ -118,6 +132,12 @@ export async function startShim(deps: ShimDeps): Promise<ShimHandle> {
     let usage: NormalizedUsage | undefined;
     let streaming = false;
     let model = "unknown";
+    // 换号重试的载体变量必须声明在 try 外：finally 的 record 要取 account.id，
+    // 而那层 try/catch 会吞掉一切异常（观测失败不能拖垮请求）——
+    // 声明进 try 块就是静默丢记录（实测：records 恒为空）。
+    let built!: { url: string; headers: Record<string, string>; body: string | Buffer };
+    let account: { id: string } | undefined;
+    let upstream!: Response;
 
     try {
       const raw = await readBody(req);
@@ -132,24 +152,67 @@ export async function startShim(deps: ShimDeps): Promise<ShimHandle> {
       // shim 这一层做 —— 这是最后一个能看到并改写请求体的地方。
       const body = applyDefaultReasoning(ensureSystemHead(raw));
 
-      const { baseUrl, headers } = await deps.prepare();
-
-      // 方言钩子存在时由它决定 URL / 头 / 请求体（Qoder 要编码请求体并重签名）；
-      // 否则维持原行为。
-      const built =
-        deps.dialect?.request === undefined
-          ? { url: `${baseUrl}/v2/chat/completions`, headers: { ...headers, "content-type": "application/json" }, body }
-          : await deps.dialect.request({ raw: body, model, baseUrl, headers });
-
-      const upstream = await fetch(built.url, {
-        method: "POST",
-        headers: built.headers,
-        // Buffer 不是合法的 BodyInit（TS 的 DOM 类型不认 Node 的 Buffer），
-        // 但运行时 undici 完全接受 Uint8Array —— 转一下即可，不改字节。
-        body: typeof built.body === "string" ? built.body : new Uint8Array(built.body),
-      });
+      // 凭据类失败（401/402/403/429）时在请求内换号重试：此刻还没向客户端
+      // 发出任何字节，静默换个账号再打，客户端只看到最终结果。
+      // maxAttempts 缺省 1 = 不换号，旧渠道零影响；400 等非凭据类失败不在
+      // 换号之列（那是请求本身的问题，多打几个账号也是浪费）。
+      const maxAttempts = Math.max(1, deps.maxAttempts?.() ?? 1);
+      for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        const prepared = await deps.prepare();
+        account = prepared.account;
+        // 方言钩子存在时由它决定 URL / 头 / 请求体（Qoder 要编码请求体并重签名）；
+        // 否则维持原行为。
+        const nextBody =
+          deps.dialect?.request === undefined
+            ? {
+                url: `${prepared.baseUrl}/v2/chat/completions`,
+                headers: { ...prepared.headers, "content-type": "application/json" },
+                body,
+              }
+            : await deps.dialect.request({
+                raw: body,
+                model,
+                baseUrl: prepared.baseUrl,
+                headers: prepared.headers,
+                account: prepared.account,
+              });
+        let resp: Response;
+        try {
+          resp = await fetch(nextBody.url, {
+            method: "POST",
+            headers: nextBody.headers,
+            // Buffer 不是合法的 BodyInit（TS 的 DOM 类型不认 Node 的 Buffer），
+            // 但运行时 undici 完全接受 Uint8Array —— 转一下即可，不改字节。
+            body: typeof nextBody.body === "string" ? nextBody.body : new Uint8Array(nextBody.body),
+          });
+        } catch (networkError) {
+          // 网络错误也换号（可能只是这个账号的网关不通）；shim 只如实上报
+          // 错误文案，计不计熔断由渠道侧的 reportResult 决定。
+          deps.onAccountResult?.(
+            prepared.account ?? { id: "" },
+            false,
+            undefined,
+            networkError instanceof Error ? networkError.message : String(networkError),
+          );
+          if (attempt < maxAttempts) continue;
+          throw networkError;
+        }
+        const failover = resp.status === 401 || resp.status === 402 || resp.status === 403 || resp.status === 429;
+        if (failover && attempt < maxAttempts) {
+          deps.onAccountResult?.(prepared.account ?? { id: "" }, false, resp.status);
+          // 响应体不打算读就要 cancel 掉，否则连接挂着不回收。
+          void resp.body?.cancel();
+          continue; // 尚未向客户端发出任何字节，可以换号
+        }
+        upstream = resp;
+        built = nextBody;
+        break;
+      }
       timer.onUpstreamHead(Date.now());
       statusCode = upstream.status;
+      // 最终采用的这次尝试无论成败都要上报：渠道侧靠 ok=true 复位熔断、写
+      // last_ok_at，靠 ok=false 累计凭据类失败（连续 3 次进冷却）。
+      deps.onAccountResult?.(account ?? { id: "" }, upstream.ok, upstream.status);
 
       if (!upstream.ok) {
         error = `upstream HTTP ${upstream.status}`;
@@ -224,6 +287,9 @@ export async function startShim(deps: ShimDeps): Promise<ShimHandle> {
               // 记录用 502：这不是成功的 2xx，面板与统计要能区分出来。
               // 但**不能**改已发出的响应头（那是 200），客户端侧靠 error chunk 自己判。
               statusCode = 502;
+              // 流内业务错误也算这个账号一次失败（Qoder 的 429 就藏在这里），
+              // 如实上报；只报第一次，与 statusCode=502 的口径一致。
+              deps.onAccountResult?.(account ?? { id: "" }, false, undefined, message);
             }
             res.write(`${translated}\n\n`);
             const parsed = parseSseLine(translated);
@@ -247,6 +313,8 @@ export async function startShim(deps: ShimDeps): Promise<ShimHandle> {
             if (message !== undefined && error === undefined) {
               error = message;
               statusCode = 502;
+              // 与流内主循环同口径：首个业务错误上报一次账号失败。
+              deps.onAccountResult?.(account ?? { id: "" }, false, undefined, message);
             }
             res.write(`${translated}\n\n`);
             const parsed = parseSseLine(translated);
@@ -270,6 +338,8 @@ export async function startShim(deps: ShimDeps): Promise<ShimHandle> {
           ...(error === undefined ? {} : { error }),
           isStreaming: streaming,
           model,
+          // 换号后 record 只记最终采用的账号，面板才能对得上「谁在服务」。
+          accountId: account?.id,
         });
       } catch {
         /* 观测失败不能拖垮请求 */

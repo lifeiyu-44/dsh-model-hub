@@ -47,7 +47,11 @@ export function AddAccountModal(props: {
     return () => document.removeEventListener("keydown", onKey);
   });
 
-  const patValid = PAT_PATTERN.test(pat);
+  // 校验与提交都吃 trim 后的值（终审 M6）：textarea 粘贴常带首尾空白/换行，
+  // 原样过格式门会把一眼合法的 PAT 挡在 disabled 后面；服务端 addQoderPat
+  // 本就 trim，这里对齐口径，提交的也是干净值。
+  const trimmedPat = pat.trim();
+  const patValid = PAT_PATTERN.test(trimmedPat);
 
   /**
    * 关闭路径统一走这里：WB 扫描成功后，数据已经变了（账号表多了行），
@@ -62,7 +66,7 @@ export function AddAccountModal(props: {
     try {
       const doc = await hubApi.addAccount({
         channelId: props.channelId,
-        ...(props.kind === "qoder" ? { pat } : {}),
+        ...(props.kind === "qoder" ? { pat: trimmedPat } : {}),
         ...(props.kind === "qoder" && displayName.trim() !== "" ? { displayName: displayName.trim() } : {}),
       });
       if ("added" in doc && Array.isArray(doc.added)) {
@@ -164,7 +168,7 @@ export function AddAccountModal(props: {
                   spellCheck: false,
                   onChange: (event: React.ChangeEvent<HTMLTextAreaElement>) => setPat(event.target.value),
                 }),
-                pat === "" || patValid
+                pat === "" || trimmedPat === "" || patValid
                   ? null
                   : h("span", { className: "dmh-form-hint" }, "格式不对：pt- 开头，后接至少 8 位字母/数字/-/_"),
               ),

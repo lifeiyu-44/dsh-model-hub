@@ -114,6 +114,9 @@ export function HubCard(): React.ReactElement {
       // 旧 host 不带 models_by_channel 键：当 `{}` 消费，展开行显示「目录为空」而不是崩
       setModelsByChannel(channelData.models_by_channel ?? {});
       setDiag(diagData);
+      // 每轮数据刷新都作废上一轮的单账号测试结果（终审 M5）：账号可能已被
+      // 删除/重配，旧「✓/✗」对不上新的数据面，留着只会误导。
+      setTestResults(new Map());
       setError(undefined);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));
@@ -246,8 +249,11 @@ export function HubCard(): React.ReactElement {
               className: "dmh-btn dmh-sm dmh-danger",
               disabled: someBusy,
               onClick: () => {
-                // 确认放在 run 外面：取消时连 load() 都不该发生
-                if (!window.confirm(`删除账号 ${account.display_name}？凭据文件不受影响`)) return;
+                // 确认放在 run 外面：取消时连 load() 都不该发生。
+                // 「删除后无法从面板恢复」要点名 —— 软删后没有任何 UI 入口
+                // 能把账号找回来（终审 M1）；「凭据文件不受影响」保留，避免
+                // 用户误以为删除会动 vault/PAT 文件。
+                if (!window.confirm(`删除账号 ${account.display_name}？删除后无法从面板恢复（凭据文件不受影响）`)) return;
                 void run(`del:${account.id}`, () => hubApi.deleteAccount(account.id))();
               },
             }, "删除"),
@@ -262,6 +268,9 @@ export function HubCard(): React.ReactElement {
     if (channels.length === 0) return h("div", { className: "dmh-note" }, "还没有渠道。");
     const rows: React.ReactNode[] = [];
     for (const channel of channels) {
+      // 模型数按渠道取（终审 M4）：全集 catalog.length 会把其它渠道的模型
+      // 也算进来；旧 host 不带 models_by_channel 键时回落全集数（聊胜于无）。
+      const channelModelCount = modelsByChannel[channel.id]?.length ?? catalog.length;
       rows.push(
         h(
           "div",
@@ -273,7 +282,7 @@ export function HubCard(): React.ReactElement {
             h(
               "div",
               { className: "dmh-row-meta" },
-              `${channel.kind} · ${catalog.length} 个模型 · 今日 ${formatCount(
+              `${channel.kind} · ${channelModelCount} 个模型 · 今日 ${formatCount(
                 channel.today_requests,
               )} 次 / ${formatCount(channel.today_tokens)} tokens`,
             ),

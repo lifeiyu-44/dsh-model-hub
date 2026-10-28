@@ -363,11 +363,17 @@ describe("解禁后的 HubCard 交互（真 React 渲染）", () => {
     [`${PREFIX}/channels`]: {
       channels: [
         { id: CHANNEL_ID, kind: "workbuddy", display_name: "WorkBuddy Global", enabled: 1, today_requests: 3, today_tokens: 1200 },
+        { id: "hub-qoder-cn", kind: "qoder", display_name: "Qoder CN", enabled: 1, today_requests: 0, today_tokens: 0 },
       ],
       accounts: [
         {
           id: ACCOUNT_ID, channel_id: CHANNEL_ID, display_name: "alice", enabled: 1, is_current: 1,
           consecutive_failures: 3, cooldown_until: COOLDOWN_UNTIL, last_error: "HTTP 401 Unauthorized",
+          last_ok_at: null, created_at: 0, has_credential: 1,
+        },
+        {
+          id: "hub-qoder-cn:pat-x", channel_id: "hub-qoder-cn", display_name: "面板PAT", enabled: 1, is_current: 1,
+          consecutive_failures: 0, cooldown_until: null, last_error: null,
           last_ok_at: null, created_at: 0, has_credential: 1,
         },
       ],
@@ -376,10 +382,15 @@ describe("解禁后的 HubCard 交互（真 React 渲染）", () => {
           { id: "deepseek-chat", name: "DeepSeek Chat", creditMultiplier: 1 },
           { id: "deepseek-reasoner", name: "DeepSeek Reasoner", creditMultiplier: 4, promotionBadge: "限时免费", tierBadge: "Pro" },
         ],
+        "hub-qoder-cn": [
+          { id: "qf-model", name: "QF Model", creditMultiplier: 1 },
+        ],
       },
     },
     [`${PREFIX}/records?limit=4`]: { requests: [], models: [] },
     [`${PREFIX}/catalog`]: { models: [] },
+    [`${PREFIX}/account/${encodeURIComponent(ACCOUNT_ID)}/test`]: { ok: true, detail: "目录拉取成功（mock）", ms: 12 },
+    [`${PREFIX}/accounts/add`]: { ok: true, added: ["hub-qoder-cn:pat-abcdef"] },
     [`${PREFIX}/diag`]: {
       recordCount: 5, oldestRecordAt: null, lastError: null,
       currentChannelId: CHANNEL_ID, currentAccountId: ACCOUNT_ID, currentAccountName: "alice",
@@ -387,10 +398,17 @@ describe("解禁后的 HubCard 交互（真 React 渲染）", () => {
     },
   };
 
-  const fakeFetch = ((input: RequestInfo | URL) => {
-    const body = responses[String(input)];
+  /** 收到的 POST（url + 解析后的 body）：M6 断言提交的是 trim 过的值。 */
+  const posts: { url: string; body: any }[] = [];
+
+  const fakeFetch = ((input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input);
+    if (init?.method === "POST") {
+      posts.push({ url, body: JSON.parse(String(init.body ?? "{}")) });
+    }
+    const body = responses[url];
     if (body === undefined) {
-      return Promise.resolve({ ok: false, status: 404, json: async () => ({ error: `mock 未覆盖 ${String(input)}` }) });
+      return Promise.resolve({ ok: false, status: 404, json: async () => ({ error: `mock 未覆盖 ${url}` }) });
     }
     return Promise.resolve({ ok: true, status: 200, json: async () => body } as Response);
   }) as typeof fetch;
@@ -466,5 +484,120 @@ describe("解禁后的 HubCard 交互（真 React 渲染）", () => {
     const source = readFileSync(CLIENT, "utf8");
     expect(source).toContain("auth/one-click");
     expect(source).toContain("records/clear");
+  });
+
+  /**
+   * 往受控输入灌值并触发 React 的 onChange。
+   *
+   * 这套假 DOM 有一个 harness 级限制：react-dom 在**模块加载期**就定格了
+   * `canUseDOM=false`（静态 import 时 window 还不存在）→ `isInputEventSupported`
+   * 恒为 false，input/change 事件在 ChangeEventPlugin 里走 IE9 polyfill 分支
+   * 被直接丢弃；且 FakeElement 天生没有 `nodeName`，插件连元素都分类不了。
+   * 唯一不依赖浏览器 API 的入口是 `shouldUseChangeEvent` 的 select 分支
+   * （getTargetInstForChangeEvent 不查 value tracker）。所以这里临时把节点的
+   * nodeName 伪装成 select、以 change 事件派发 —— 只为把 onChange 送进
+   * React；被测的是「组件拿到什么值、拿它做什么」，不是事件通道本身。
+   */
+  async function typeInto(target: any, text: string): Promise<void> {
+    target.value = text;
+    const savedNodeName = (target as any).nodeName;
+    (target as any).nodeName = "select";
+    try {
+      let node: any = target;
+      while (node.parentNode !== null) node = node.parentNode;
+      await act(async () => {
+        for (const listener of node.listeners?.get("change") ?? []) {
+          listener({
+            type: "change", target, bubbles: true, cancelable: false,
+            defaultPrevented: false, preventDefault() {}, stopPropagation() {},
+          });
+        }
+      });
+    } finally {
+      if (savedNodeName === undefined) delete (target as any).nodeName;
+      else (target as any).nodeName = savedNodeName;
+    }
+  }
+
+  it("渠道行 meta 的模型数按渠道统计（models_by_channel），不再是全集 catalog.length", async () => {
+    const tab = buttonByLabel("渠道");
+    expect(tab).toBeDefined();
+    await act(async () => {
+      tab!.click();
+    });
+    // fixture：catalog（全集）为空 []，models_by_channel 里 WB 2 条、Qoder 1 条
+    // —— 旧实现两行都显示「0 个模型」（拿全集目录数冒充渠道模型数）。
+    expect(container.textContent).toContain("2 个模型");
+    expect(container.textContent).toContain("1 个模型");
+  });
+
+  it("删除确认文案说明「删除后无法从面板恢复」，并保留「凭据文件不受影响」", async () => {
+    const tab = buttonByLabel("账号");
+    await act(async () => {
+      tab!.click();
+    });
+    let confirmMessage: string | undefined;
+    const prevConfirm = (globalThis as any).confirm;
+    (globalThis as any).confirm = (message: string) => {
+      confirmMessage = message;
+      return false; // 取消：删除不该真的发出去
+    };
+    try {
+      const del = buttonByLabel("删除");
+      expect(del).toBeDefined();
+      await act(async () => {
+        del!.click();
+      });
+    } finally {
+      (globalThis as any).confirm = prevConfirm;
+    }
+    expect(confirmMessage, "删除必须先弹确认").toBeTypeOf("string");
+    expect(confirmMessage).toContain("删除后无法从面板恢复");
+    expect(confirmMessage).toContain("凭据文件不受影响");
+    expect(posts, "取消删除不得发出任何写请求").toHaveLength(0);
+  });
+
+  it("load() 清空单账号测试结果：数据刷新后「✓」不残留（旧结果对不上新数据面）", async () => {
+    const tab = buttonByLabel("账号");
+    await act(async () => {
+      tab!.click();
+    });
+    posts.length = 0;
+    const test = buttonByLabel("测试");
+    await act(async () => {
+      test!.click();
+    });
+    expect(posts.some((p) => p.url.includes("/test")), "测试应发出 account/test").toBe(true);
+    const refresh = buttonByLabel("刷新");
+    await act(async () => {
+      refresh!.click();
+    });
+    expect(container.textContent).not.toContain("✓");
+  });
+
+  it("AddAccountModal：PAT 首尾带空白也能过前端格式门，提交的是 trim 后的值", async () => {
+    const tab = buttonByLabel("账号");
+    await act(async () => {
+      tab!.click();
+    });
+    // 两个渠道组各有一个「+ 添加账号」；Qoder 组的第二个才带 PAT 表单
+    const addButtons = buttons().filter((b) => b.textContent === "+ 添加账号");
+    expect(addButtons.length).toBeGreaterThanOrEqual(2);
+    await act(async () => {
+      addButtons[1]!.click();
+    });
+    const textarea = walk(container).find((n) => n.nodeType === 1 && n.tagName === "TEXTAREA");
+    expect(textarea, "Qoder 形态应有 PAT 输入框").toBeDefined();
+    await typeInto(textarea!, "  pt-abcdef123456\n"); // 模拟粘贴带首尾空白（含换行）
+    const add = buttonByLabel("添加");
+    expect(add, "弹层应有「添加」按钮").toBeDefined();
+    expect(isDisabled(add!), "trim 后合法的 PAT 应解禁提交按钮").toBe(false);
+    posts.length = 0;
+    await act(async () => {
+      add!.click();
+    });
+    const addPost = posts.find((p) => p.url.endsWith("/accounts/add"));
+    expect(addPost, "应提交 accounts/add").toBeDefined();
+    expect(addPost!.body.pat).toBe("pt-abcdef123456"); // 提交 trim 后的值
   });
 });

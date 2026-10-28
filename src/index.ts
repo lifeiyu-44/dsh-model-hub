@@ -13,7 +13,6 @@ import { readWorkbuddyVault } from "./channels/workbuddy/vault.js";
 import { fetchCatalog, upstreamBase, conversationIdentityHeaders } from "./channels/workbuddy/catalog.js";
 import { createHubAdapter, createDirectAdapter } from "./provider.js";
 import { registerDataRoutes } from "./routes/data.js";
-import { readZcodeProviders, type ZcodeProvider } from "./channels/zcode/config.js";
 
 export const name = "dsh-model-hub";
 export { Config };
@@ -176,34 +175,8 @@ function applyInner(ctx: any, config: any): void {
     // 两种写法的差异由 tests/webserver-access.spec.ts 用真实 Cordis 定死。
     registerDataRoutes(ctx, { db, catalog: () => models });
 
-    // ── ZCode 渠道 ──
-    //
-    // 与 WorkBuddy 不同，ZCode 的每个 provider 自带 baseUrl + apiKey + 协议，
-    // 不需要经过我们的 shim，直接注册成 provider 路由。
-    //
-    // 代价：直连请求**不进本插件的记录表**（没有经过 shim 埋点）。
-    // 面板上不能假装有 ZCode 的 token 速度 —— 这条限制写在 provider.ts 里。
-    const zcode = readZcodeProviders();
-    const zcodeRegistered: string[] = [];
-    try {
-      for (const backend of zcode.providers) {
-        const ok = await registerZcodeProvider(ctx, backend);
-        if (ok) zcodeRegistered.push(`hub-zcode-${backend.slug}`);
-      }
-    } catch (error) {
-      ctx.logger?.warn?.("dsh-model-hub: ZCode 渠道注册失败（不影响 WorkBuddy）", error);
-    }
-    if (zcode.skipped.length > 0) {
-      ctx.logger?.warn?.(
-        `dsh-model-hub: ZCode 跳过 ${zcode.skipped.length} 个 provider —— ${zcode.skipped
-          .map((s) => `${s.name}: ${s.reason}`)
-          .join("；")}`,
-      );
-    }
-
     ctx.logger?.info?.(
-      `dsh-model-hub: 已注册 ${PROVIDER_GLOBAL}（${models.length} 个模型），shim=${shim.baseUrl()}` +
-        (zcodeRegistered.length > 0 ? `；ZCode ${zcodeRegistered.length} 个 provider` : ""),
+      `dsh-model-hub: 已注册 ${PROVIDER_GLOBAL}（${models.length} 个模型），shim=${shim.baseUrl()}`,
     );
   })().catch((caught: unknown) => {
     // 异步体里任何逃逸的异常都不得冒到宿主加载期 —— 那会 fatal。
@@ -331,52 +304,4 @@ function registerProvider(
   };
 }
 
-/**
- * 注册一个 ZCode provider（直连型）。
- *
- * 每个 ZCode provider 有自己的 baseUrl / apiKey / 协议，所以是**一个 provider
- * 一个路由**，而不是像 WorkBuddy 那样所有模型挤在一条路由后面走 shim。
- *
- * 返回是否注册成功（失败只记日志，不影响其它 provider）。
- */
-async function registerZcodeProvider(ctx: any, backend: ZcodeProvider): Promise<boolean> {
-  const providerId = `hub-zcode-${backend.slug}`;
-  try {
-    const [{ PiAiAdapter }, { createProvider }, { openAICompletionsApi }, { anthropicMessagesApi }, { resolveRetryPolicy }] =
-      await Promise.all([
-        import("@deepseek-ai/dsh-llm-pi-ai"),
-        import("@earendil-works/pi-ai"),
-        import("@earendil-works/pi-ai/api/openai-completions.lazy"),
-        import("@earendil-works/pi-ai/api/anthropic-messages.lazy"),
-        import("@deepseek-ai/dsh-llm"),
-      ]);
 
-    const adapter = createDirectAdapter({
-      provider: providerId,
-      displayName: `ZCode · ${backend.name}`,
-      baseUrl: backend.baseUrl,
-      apiKey: backend.apiKey,
-      api: backend.api,
-      models: backend.models,
-      createProvider,
-      openAICompletionsApi,
-      anthropicMessagesApi,
-      resolveRetryPolicy,
-      PiAiAdapter,
-    });
-
-    ctx.llm.registerAdapter([providerId], adapter);
-
-    // 与 WorkBuddy 一样，注册后自检一次 —— 「注册没报错」不等于「能出模型」。
-    const listed = await adapter.listModels(providerId);
-    if (listed.length === 0) {
-      ctx.logger?.warn?.(`dsh-model-hub: ${providerId} 注册成功但模型为空`);
-      return false;
-    }
-    ctx.logger?.info?.(`dsh-model-hub: 已注册 ${providerId}（${listed.length} 个模型，直连）`);
-    return true;
-  } catch (error) {
-    ctx.logger?.warn?.(`dsh-model-hub: ${providerId} 注册失败`, error);
-    return false;
-  }
-}

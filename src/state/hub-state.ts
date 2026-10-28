@@ -178,9 +178,14 @@ export function createHubState(deps: HubStateDeps): HubState {
     if (!entry.adapterOn) {
       entry.handle.setEnabled(true);
       entry.adapterOn = true;
-    } else if (entry.handle.models.length === 0) {
-      // 该有但模型空（比如起 runtime 时目录拉失败后凭据恢复了）：刷目录重上架。
+    }
+    if (entry.handle.models.length === 0) {
+      // 该有但模型空（起步时目录拉成功但为空等）：刷目录。刷新后补一次幂等
+      // 上架 —— 空目录起步时 register 拒上过空目录，adapterOn 的 true 是预期
+      // 态而非事实；若 handle 的 refresh 不自带重注册，这次 setEnabled 就是它
+      // 回到选择器的唯一通路（面板有模型 ≠ 选择器能用）。
       await entry.handle.refresh();
+      entry.handle.setEnabled(true);
     }
   }
 

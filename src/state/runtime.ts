@@ -273,7 +273,11 @@ export async function startChannelRuntime(deps: ChannelRuntimeDeps): Promise<Run
     get models() { return models; },
     get panelEntries() { return panelEntries; },
     async refresh() {
+      // 两个起点都要照顾：已上架（换新目录重注册）与空目录起步从未上架
+      // （这一步就是首次上架）。漏掉后者 = 面板看得到模型、选择器永远选不到
+      // —— P0「看起来成功」的新形态。
       const wasOn = adapterRelease !== undefined;
+      const wasEmpty = models.length === 0;
       let next: ChannelModel[];
       try {
         next = await fetchCatalogForHead();
@@ -289,7 +293,7 @@ export async function startChannelRuntime(deps: ChannelRuntimeDeps): Promise<Run
       models = next;
       panelEntries = toPanelEntries(next);
       releaseAdapter();
-      if (wasOn) register();
+      if (wasOn || wasEmpty) register();
     },
     setEnabled(enabled: boolean) {
       if (enabled) register();

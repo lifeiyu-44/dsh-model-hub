@@ -3,6 +3,7 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
+import type { ChannelModel } from "../src/channels/types.js";
 import { openHubDatabase } from "../src/store/db.js";
 import { seedChannelsAndAccounts, upsertOneAccount } from "../src/store/seed.js";
 import { createHubState } from "../src/state/hub-state.js";
@@ -108,4 +109,43 @@ it("reportResult 记账后 pick 自然换号：3 次凭据类失败进冷却", a
   state.reportResult("c", "a1", false, 401);
   expect(state.pick("c")?.id).toBe("a2"); // 冷却生效，prepare 下次自然换号
   expect(state.poolSize("c")).toBe(2); // 冷却不是删号：池还在，只被 pick 跳过
+});
+
+it("起步空目录 → sync 触发 refresh 拿到非空 → 重新上架", async () => {
+  const db = await tempDb();
+  seedChannelsAndAccounts(db,
+    [{ id: "c", kind: "qoder", displayName: "C" }],
+    [{ id: "a1", channelId: "c", displayName: "A1", credentialRef: "x", isCurrent: true }]);
+
+  // 有状态 fake，忠实模拟生产 runtime 的上架规则：
+  //   ① 空目录拒上架（register 拒上空目录，P0 教训）② setEnabled 幂等重入。
+  // refresh 只换目录、不自带上架 —— 复现审查发现的缺口形态：目录拉成功但为
+  // 空（Qoder 空目录是真实发生过的场景），面板有模型而选择器永远选不到。
+  const calls: string[] = [];
+  let catalog: ChannelModel[] = []; // 起步：目录拉成功但为空
+  let adapterUp = false;
+  const state = createHubState({
+    db, settings: () => ({}), logger: {},
+    runtimeFactory: async () => ({
+      shim: { baseUrl: () => "http://127.0.0.1:1", token: () => "t", close: () => {} },
+      release: () => { if (adapterUp) { adapterUp = false; calls.push("release"); } },
+      get models() { return catalog; },
+      get panelEntries() { return catalog.map((m) => ({ id: m.id, name: m.name })); },
+      refresh: async () => { if (catalog.length === 0) catalog = [{ id: "m1", name: "M1", contextWindow: 128_000, maxTokens: 32_000, creditMultiplier: 0, supportsImages: false }]; },
+      setEnabled: (b: boolean) => {
+        const want = b && catalog.length > 0; // 空目录拒上架
+        if (want === adapterUp) return; // 幂等
+        adapterUp = want;
+        calls.push(want ? "register" : "release");
+      },
+    }),
+  });
+
+  await state.ensureRuntime("c");
+  expect(calls).toEqual([]); // 空目录：拒上架，选择器无模型
+
+  await state.syncChannelRuntime("c"); // 「该有但模型空」分支
+  expect(catalog.map((m) => m.id)).toEqual(["m1"]); // refresh 换到非空目录
+  expect(calls).toEqual(["register"]); // 修复点：刷新后补上架，模型回到选择器
+  expect(state.panelModelsByChannel()["c"]).toEqual([{ id: "m1", name: "M1" }]);
 });

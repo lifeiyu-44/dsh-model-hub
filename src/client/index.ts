@@ -1,6 +1,8 @@
 import React from "react";
+import * as ReactDOMClient from "react-dom/client";
 import { HubCard } from "./HubCard.js";
-import { RecordsModal } from "./RecordsModal.js";
+import { HubPanel } from "./HubPanel.js";
+import { ModelLabel } from "./ModelLabel.js";
 
 /**
  * 客户端入口。
@@ -68,10 +70,17 @@ export function apply(ctx: any): void {
     };
 
     // ── 1. 设置卡片：两处都注册 ──
-    // 不同入口的挂载点不同，哪个能显示就显示哪个。
+    //
+    // `key` 必须与宿主 inventory 里的插件名一致，否则卡片不渲染、也不报错
+    // （参考实现 issue #55 记录的正是这个静默失败）。而 inventory 的名字
+    // 可能是裸包名，也可能是 `include:<包名>` —— 取决于 profile 怎么挂载它。
+    // 所以两种拼写都注册：不同 key 落在不同单元格，是安全的重复而非冲突。
+    const CARD_KEYS = ["dsh-model-hub", "include:dsh-model-hub"];
     const cardProps = () => ({});
-    register("plugins.bundle.config", { key: "dsh-model-hub", priority: 30 }, HubCard, cardProps);
-    register("plugins.row.config", { key: "dsh-model-hub#dsh-model-hub", priority: 30 }, HubCard, cardProps);
+    for (const key of CARD_KEYS) {
+      register("plugins.bundle.config", { key, priority: 30 }, HubCard, cardProps);
+      register("plugins.row.config", { key: `${key}#${key}`, priority: 30 }, HubCard, cardProps);
+    }
 
     // ── 2. 左下角入口（侧边栏底部，Settings 旁边）──
     // 官方契约："Optional actions beside Settings at the sidebar foot."
@@ -80,24 +89,7 @@ export function apply(ctx: any): void {
       h(
         "button",
         {
-          onClick: () => {
-            // 打开记录弹层。用自建 portal 而不是依赖宿主的弹层服务，
-            // 这样在宿主没有该服务时也能工作。
-            const host = document.createElement("div");
-            host.id = "dsh-model-hub-modal";
-            document.body.appendChild(host);
-            const close = () => {
-              host.remove();
-            };
-            // 用 createRoot 渲染，避免和宿主 React 版本冲突
-            const ReactDOM = (globalThis as any).__DSH_REACT_DOM_CLIENT__;
-            if (ReactDOM?.createRoot) {
-              ReactDOM.createRoot(host).render(h(RecordsModal, { onClose: close }));
-            } else {
-              console.warn("[dsh-model-hub] 无法打开弹层：宿主未暴露 react-dom/client");
-              close();
-            }
-          },
+          onClick: () => openHubPanel(),
           title: "DSH Model Hub 记录",
           "aria-label": "DSH Model Hub 记录",
           style: {
@@ -131,8 +123,74 @@ export function apply(ctx: any): void {
       FooterEntry,
       () => ({}),
     );
+
+    // ── 3. 输入框行内的胶囊：**已移除** ──
+    //
+    // 曾经挂在 `conversation.input.left`（以及更早的 composer.dock），显示
+    // 「最近一次请求」的 tok/s、out、TTFT。实测有两个问题，都不是能靠小改解决的：
+    //
+    // 1. **重复渲染**：composer.dock 与 input.left 在 0.2.1-rc.3 上都会挂载，
+    //    同一个胶囊画了两遍。
+    // 2. **与实际选择不符**：这个槽拿不到「当前选中的模型」，只能显示上一条记录，
+    //    于是用户选了 DeepSeek 却看到 `hy3 · 120 tok/s`，看起来像 hy3 正在生效。
+    //
+    // 第二点是设计缺陷而不是 bug：要修就得从宿主读 modelSelection 投影，
+    // 而那要额外声明 `remote.session` 一类服务。既然这些数字在「Model Hub」面板的
+    // 记录栏里本来就有，就不在输入框制造误导了。
+    // 参考实现把额度读数放在这里，是因为它按 provider 归属过滤（只在自己的
+    // 模型被选中时渲染）—— 我们做不到那个过滤，就不放。
+
+    // ── 4. 模型标签的彩色后缀 ──
+    //
+    // 宿主把模型名当纯文本渲染，`· x0.00 · Free now` 只能是灰字。
+    // 彩色 pill 必须在这个插槽里自己画（参考实现同样如此）。
+    // 这个槽不需要 inject 回调 —— 宿主直接传 { provider, model, placement }。
+    try {
+      ctx.slots.inject("conversation.input.model.label", () =>
+        ctx.slots.register({ name: "conversation.input.model.label", priority: 30 }, ModelLabel),
+      );
+    } catch (error) {
+      console.error("[dsh-model-hub] 模型标签槽注册失败（不影响 provider）:", error);
+    }
   } catch (error) {
     // 最外层防线：客户端加载失败也不该影响 host 侧 provider。
     console.error("[dsh-model-hub] 客户端初始化失败（host provider 不受影响）:", error);
   }
+}
+
+/**
+ * 打开 Model Hub 主面板。
+ *
+ * **不用 `globalThis.__DSH_REACT_DOM_CLIENT__`** —— 实测宿主根本没暴露这个
+ * 全局对象，之前那条分支永远走 else，点按钮只会打一行警告然后立刻关掉。
+ *
+ * 改为自己挂一个独立 React root：`react-dom/client` 由宿主 `require` 提供
+ * （`__ModuleLoader__` 的 factory 参数里有），同一个 React 实例，
+ * 不会出现双实例 hooks 崩溃。
+ *
+ * 幂等：面板已存在时再点就关掉（当作开关用，符合左下角入口的直觉）。
+ */
+function openHubPanel(): void {
+  const existing = document.getElementById("dsh-model-hub-panel");
+  if (existing !== null) {
+    existing.remove();
+    return;
+  }
+
+  const host = document.createElement("div");
+  host.id = "dsh-model-hub-panel";
+  document.body.appendChild(host);
+
+  const close = () => {
+    try {
+      root.unmount();
+    } catch {
+      /* 已经卸载过就忽略 */
+    }
+    host.remove();
+  };
+
+  const { createRoot } = ReactDOMClient;
+  const root = createRoot(host);
+  root.render(h(HubPanel, { onClose: close }));
 }

@@ -43,7 +43,16 @@ describe("client.js 能被宿主的 loader 加载", () => {
       __ModuleLoader__: {
         load(entry: { id: string; factory: (require: (name: string) => unknown) => unknown }) {
           const hostRequire = (name: string) => {
-            if (name === "react" || name === "react/jsx-runtime") return nodeRequire(name);
+            // 宿主真实提供给客户端插件的模块集合（web 壳的 staticModules）：
+            // react / react-dom / react-dom/client 都在里面。
+            if (
+              name === "react" ||
+              name === "react/jsx-runtime" ||
+              name === "react-dom" ||
+              name === "react-dom/client"
+            ) {
+              return nodeRequire(name);
+            }
             throw new Error(`unexpected require(${JSON.stringify(name)})`);
           };
           captured = entry.factory(hostRequire);
@@ -124,11 +133,16 @@ describe("client.js 能被宿主的 loader 加载", () => {
    * `cannot get property "remote.session" without inject`，
    * 把**模型选择器**整个打不开。
    *
-   * 参考实现 `dsh-connect-workbuddy` 的每个 slot 都带 `inject`，
-   * 所以它只声明 `["slots","locale"]` 也正常。这一条守的就是这个。
+   * 例外：`conversation.input.model.label` 不用 inject 回调。
+   * 宿主的模型标签槽直接传 `{ provider, model, placement }`，
+   * 参考实现 `dsh-connect-workbuddy` 注册这个槽时也没传（它只传 name + priority），
+   * 而且实测工作正常。其余每个槽都必须带。
    */
-  it("每个 slot 都带 inject 回调（缺了会让模型选择器崩）", () => {
+  const NO_INJECT_NEEDED = new Set(["conversation.input.model.label"]);
+
+  it("除模型标签槽外，每个 slot 都带 inject 回调（缺了会让模型选择器崩）", () => {
     for (const entry of registered) {
+      if (NO_INJECT_NEEDED.has(entry.slot)) continue;
       expect(entry.options.inject, `slot ${entry.slot} 缺少 inject 回调`).toBeTypeOf("function");
     }
   });

@@ -22,6 +22,30 @@ export interface HubModel {
   contextWindow: number;
   maxTokens: number;
   supportsImages: boolean;
+  /** 上游给的倍率，用于显示名后缀。 */
+  creditMultiplier?: number;
+  /** 活动标记文案（如 `Free now`）。 */
+  promotionBadge?: string;
+  /** 等级标记文案（如 `Pro Only`）。 */
+  tierBadge?: string;
+}
+
+/**
+ * 生成展示名：`Name · x0.00 · Free now`。
+ *
+ * 与参考实现 `dsh-connect-workbuddy` 的 `workBuddyDisplayName()` 同思路 ——
+ * 先例把倍率拼进名字（`GLM-5.3 · x0.79`），用户才能在选模型时看到价格档位。
+ * 我们额外带上活动的等级标记，否则「这个模型免费 / 要 Pro」只能去官网查。
+ *
+ * 只影响**显示**：所有 join（模型选择、请求记录、上游 `model` 字段）
+ * 都按 `id`，不按这个名字。
+ */
+export function displayNameOf(model: HubModel): string {
+  const parts = [model.name];
+  if (model.creditMultiplier !== undefined) parts.push(`x${model.creditMultiplier.toFixed(2)}`);
+  if (model.promotionBadge !== undefined) parts.push(model.promotionBadge);
+  else if (model.tierBadge !== undefined) parts.push(model.tierBadge);
+  return parts.join(" · ");
 }
 
 /**
@@ -86,11 +110,20 @@ export function buildProviderProfile(input: BuildProviderInput): Record<string, 
 
   const piModels = models.map((m) => ({
     id: m.id,
-    name: m.name,
+    name: displayNameOf(m),
     api: "openai-completions" as const,
     provider,
     baseUrl: shimBaseUrl,
-    input: m.supportsImages ? (["text", "image"] as const) : (["text"] as const),
+    // **只声明文本**，即使上游目录说 supportsImages。
+    //
+    // 实测（2026-10-28）：声明 image 后，用户贴图会以
+    // `pi-ai image input requires the durable attachment service`
+    // (UNSUPPORTED_CONTENT) 让整轮失败 —— 因为我们的 adapter 没有接
+    // 宿主的 `resolveAttachments` / `resolveImageAccess`，默认的注入路径不给它。
+    //
+    // 与其宣称一个做不到的能力、在用户贴图时才炸，不如如实声明纯文本：
+    // 宿主会在发送前就拦下并给出清楚的提示。要真支持图片，得先接上附件服务。
+    input: ["text"] as const,
     cost: NO_COST,
     contextWindow: m.contextWindow,
     maxTokens: m.maxTokens,
@@ -141,6 +174,85 @@ export function createHubAdapter(input: BuildProviderInput): any {
     profiles: () => new Map([[input.provider, profile]]),
     auth: INERT_AUTH,
     resolveApiKey: async () => input.shimToken,
+  });
+}
+
+/**
+ * 直连型 provider（ZCode 这类：自带 baseUrl 与 apiKey，不需要我们的 shim）。
+ *
+ * ## 与 shim 型的区别
+ *
+ * shim 型（WorkBuddy）把真实 token 握在 host 进程里，请求先回环到自己的
+ * shim 再转发，好处是能统一埋点。直连型没有这一层：apiKey 直接交给 pi-ai，
+ * 请求从 adapter 直发上游。
+ *
+ * **代价：直连的请求不会被本插件记录**（没有经过 shim 的埋点）。
+ * 这是当前阶段的取舍 —— 先让 ZCode 能用，指标留给后续的协议感知 shim。
+ * UI 上不能假装有 ZCode 的 token 速度。
+ */
+export interface DirectProviderInput extends ProviderDeps {
+  provider: string;
+  displayName: string;
+  baseUrl: string;
+  apiKey: string;
+  api: "openai-completions" | "anthropic-messages";
+  models: { id: string; name: string }[];
+  /** anthropic 协议需要它；openai 协议传 undefined 即可。 */
+  anthropicMessagesApi?: () => any;
+}
+
+export function createDirectAdapter(input: DirectProviderInput): any {
+  const piModels = input.models.map((m) => ({
+    id: m.id,
+    name: m.name,
+    api: input.api,
+    provider: input.provider,
+    baseUrl: input.baseUrl,
+    input: ["text"] as const,
+    cost: NO_COST,
+    // 直连型拿不到上游的上下文窗口声明，用一个保守但不算离谱的默认值；
+    // 宁可比实际小，也不要虚报导致超长请求被上游拒。
+    contextWindow: 128_000,
+    maxTokens: 8_192,
+    reasoning: false,
+  }));
+
+  // 只保留「用到的那个协议」的工厂：传进来的两个工厂都是惰性 import 的，
+  // 这里只调用需要的一个，避免多加载一个协议实现。
+  const apiImpl = input.api === "anthropic-messages" ? input.anthropicMessagesApi?.() : input.openAICompletionsApi();
+
+  const piProvider = input.createProvider({
+    id: input.provider,
+    name: input.displayName,
+    baseUrl: input.baseUrl,
+    auth: {
+      apiKey: {
+        name: `${input.displayName} (dsh-model-hub)`,
+        resolve: ({ credential }: any) =>
+          Promise.resolve({
+            auth: credential?.key === undefined ? {} : { apiKey: credential.key },
+            source: "dsh-model-hub",
+          }),
+      },
+    },
+    models: piModels,
+    api: apiImpl,
+  } as any);
+
+  const profile = {
+    provider: input.provider,
+    displayName: input.displayName,
+    piProvider,
+    configuredMaxTokens: new Map(),
+    modelErrors: new Map(),
+    streamIdleTimeoutMs: 300_000,
+    retryPolicy: input.resolveRetryPolicy(undefined, "dsh-model-hub direct retryPolicy"),
+  };
+
+  return new input.PiAiAdapter({
+    profiles: () => new Map([[input.provider, profile]]),
+    auth: INERT_AUTH,
+    resolveApiKey: async () => input.apiKey,
   });
 }
 

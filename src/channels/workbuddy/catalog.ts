@@ -59,11 +59,23 @@ export async function fetchCatalog(
   const data = (doc["data"] ?? doc) as Record<string, unknown>;
   const models = Array.isArray(data["models"]) ? (data["models"] as Record<string, unknown>[]) : [];
 
+  // 活动标记（`Free now`）与等级标记（`Pro Only`）是**独立数组**，
+  // 各自用 `modelIds` 指向模型 —— 不写在模型条目里（实测 2026-10-28）。
+  const promotionOf = badgeIndex(data["modelPromotions"]);
+  const tierOf = badgeIndex(data["modelTiers"]);
+  // 颜色单独取，供浏览器侧画彩色 pill
+  const promotionColorOf = badgeColorIndex(data["modelPromotions"]);
+  const tierColorOf = badgeColorIndex(data["modelTiers"]);
+
   return models.flatMap((entry) => {
     const id = typeof entry["id"] === "string" ? entry["id"] : "";
     if (id === "") return [];
     const maxInput = typeof entry["maxInputTokens"] === "number" ? entry["maxInputTokens"] : 200_000;
     const maxOutput = typeof entry["maxOutputTokens"] === "number" ? entry["maxOutputTokens"] : 32_000;
+    const promotion = promotionOf(id);
+    const tier = tierOf(id);
+    const promotionColor = promotionColorOf(id);
+    const tierColor = tierColorOf(id);
     return [{
       id,
       name: typeof entry["name"] === "string" ? entry["name"] : id,
@@ -75,8 +87,88 @@ export async function fetchCatalog(
       // 仍由上游账单决定，这个字段只用于面板排序与提示。
       creditMultiplier: parseCredits(entry["credits"]),
       supportsImages: entry["supportsImages"] === true,
+      ...(promotion === undefined ? {} : { promotionBadge: promotion }),
+      ...(tier === undefined ? {} : { tierBadge: tier }),
+      ...(promotionColor === undefined ? {} : { promotionColor }),
+      ...(tierColor === undefined ? {} : { tierColor }),
     }];
   });
+}
+
+/**
+ * 把「带 modelIds 的标记数组」转成 `模型 id -> 标记文案` 的查表。
+ *
+ * 上游形状（实测 2026-10-28）：
+ * ```json
+ * { "badge": { "label": "Free now", "color": "#FF0000" },
+ *   "modelIds": ["hy3"], "enabled": true, "priority": 200 }
+ * ```
+ * 只取 `enabled !== false` 的条目；同一模型多条时 `priority` 高的胜出。
+ * 文案按上游原样返回 —— 那是给用户看的字，不改写。
+ */
+export function badgeIndex(value: unknown): (modelId: string) => string | undefined {
+  const table = new Map<string, { label: string; priority: number }>();
+  if (!Array.isArray(value)) return () => undefined;
+
+  for (const raw of value) {
+    if (typeof raw !== "object" || raw === null) continue;
+    const entry = raw as Record<string, unknown>;
+    if (entry["enabled"] === false) continue;
+    const badge = entry["badge"];
+    if (typeof badge !== "object" || badge === null) continue;
+    const label = (badge as Record<string, unknown>)["label"];
+    if (typeof label !== "string" || label === "") continue;
+    const priority = typeof entry["priority"] === "number" ? entry["priority"] : 0;
+    const ids = entry["modelIds"];
+    if (!Array.isArray(ids)) continue;
+    for (const id of ids) {
+      if (typeof id !== "string") continue;
+      const previous = table.get(id);
+      if (previous === undefined || priority >= previous.priority) table.set(id, { label, priority });
+    }
+  }
+
+  return (modelId) => table.get(modelId)?.label;
+}
+
+/**
+ * 标记的颜色，与 {@link badgeIndex} 同源但单独取。
+ *
+ * 颜色是给**浏览器侧**渲染彩色标签用的：宿主的模型标签槽
+ * （`conversation.input.model.label`）允许自定义渲染，参考实现就是在那里
+ * 用 `badge.color` 画彩色 pill 的。所以颜色要能从 host 传到 client。
+ *
+ * 只接受 `#rgb` / `#rrggbb` / `rgb(...)` 这类安全的 CSS 颜色字面量 ——
+ * 上游是外部数据，不该让任意字符串进 `style.background`。
+ */
+export function badgeColorIndex(value: unknown): (modelId: string) => string | undefined {
+  const table = new Map<string, { color: string; priority: number }>();
+  if (!Array.isArray(value)) return () => undefined;
+
+  for (const raw of value) {
+    if (typeof raw !== "object" || raw === null) continue;
+    const entry = raw as Record<string, unknown>;
+    if (entry["enabled"] === false) continue;
+    const badge = entry["badge"];
+    if (typeof badge !== "object" || badge === null) continue;
+    const color = (badge as Record<string, unknown>)["color"];
+    if (typeof color !== "string" || !isSafeCssColor(color)) continue;
+    const priority = typeof entry["priority"] === "number" ? entry["priority"] : 0;
+    const ids = entry["modelIds"];
+    if (!Array.isArray(ids)) continue;
+    for (const id of ids) {
+      if (typeof id !== "string") continue;
+      const previous = table.get(id);
+      if (previous === undefined || priority >= previous.priority) table.set(id, { color, priority });
+    }
+  }
+
+  return (modelId) => table.get(modelId)?.color;
+}
+
+/** 只放行十六进制与 rgb()/rgba() 字面量。 */
+function isSafeCssColor(value: string): boolean {
+  return /^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/.test(value) || /^rgba?\(\s*\d{1,3}\s*,\s*\d{1,3}\s*,\s*\d{1,3}\s*(?:,\s*[\d.]+\s*)?\)$/.test(value);
 }
 
 /**

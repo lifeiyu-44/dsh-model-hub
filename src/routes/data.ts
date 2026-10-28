@@ -40,7 +40,26 @@ function hostIsLoopback(host: string | undefined): boolean {
  */
 export function registerDataRoutes(
   ctx: { inject: (deps: string[], cb: (inner: any) => void) => void; effect: any; logger?: any },
-  deps: { db: DatabaseSync },
+  deps: {
+    db: DatabaseSync;
+    /**
+     * 目录快照（模型 id -> 倍率与标记颜色）。
+     *
+     * 浏览器侧的模型标签槽要画彩色 pill，但客户端只拿到 `model.id`，
+     * 并不知道倍率与颜色。所以由 host 把这份映射发过去。
+     *
+     * 用函数而不是快照值：目录是异步拉的，取的时候要拿最新的一份。
+     */
+    catalog?: () => {
+      id: string;
+      name: string;
+      creditMultiplier?: number;
+      promotionBadge?: string;
+      tierBadge?: string;
+      promotionColor?: string;
+      tierColor?: string;
+    }[];
+  },
 ): void {
   ctx.inject(["webServer"], (inner: any) => {
     try {
@@ -52,6 +71,14 @@ export function registerDataRoutes(
             handler: (req: any, res: any) => {
               if (!gate(req, res)) return;
               json(res, 200, querySummary(deps.db));
+            },
+          }),
+          inner.webServer.register({
+            kind: "exact",
+            path: `${DATA_PREFIX}/catalog`,
+            handler: (req: any, res: any) => {
+              if (!gate(req, res)) return;
+              json(res, 200, { models: deps.catalog?.() ?? [] });
             },
           }),
           inner.webServer.register({

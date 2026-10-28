@@ -1,78 +1,78 @@
 {
-  "name": "dsh-model-hub",
-  "displayName": "DSH Model Hub",
-  "description": "把 WorkBuddy / ZCode / Qoder CN 的模型统一接入 DeepSeek Harness，带账号管理与请求记录",
-  "version": "0.1.0",
-  "license": "MIT",
-  "type": "module",
-  "engines": {
-    "node": "^22.19.0 || >=24.0.0"
-  },
-  "main": "lib/index.js",
-  "types": "lib/index.d.ts",
-  "exports": {
-    ".": {
-      "types": "./lib/index.d.ts",
-      "default": "./lib/index.js"
-    },
-    "./client": "./client.js",
-    "./cordis.patch.yml": "./cordis.patch.yml",
-    "./package.json": "./package.json"
-  },
-  "files": [
-    "lib",
-    "client.js",
-    "cordis.patch.yml",
-    "README.md"
-  ],
-  "scripts": {
-    "build": "tsdown",
-    "test": "vitest run",
-    "typecheck": "tsc -p tsconfig.json --noEmit"
-  },
-  "dependencies": {
-    "@deepseek-ai/schemastery": "3.18.5"
-  },
-  "peerDependencies": {
-    "@deepseek-ai/cordis": ">=4.0.1-rc.1 <5.0.0",
-    "@deepseek-ai/dsh-atomic-write": ">=0.1.7-rc.1 <0.3.0-0",
-    "@deepseek-ai/dsh-home-paths": ">=0.1.7-rc.1 <0.3.0-0",
-    "@deepseek-ai/dsh-host-webserver": ">=0.1.7-rc.1 <0.3.0-0",
-    "@deepseek-ai/dsh-llm": ">=0.1.7-rc.1 <0.3.0-0",
-    "@deepseek-ai/dsh-llm-pi-ai": ">=0.1.7-rc.1 <0.3.0-0",
-    "@deepseek-ai/dsh-settings": ">=0.1.7-rc.1 <0.3.0-0",
-    "@earendil-works/pi-ai": ">=0.85.0 <0.88.0 || >=1.0.0-0 <2.0.0"
-  },
-  "devDependencies": {
-    "@deepseek-ai/cordis": "4.0.5",
-    "@deepseek-ai/dsh-home-paths": "0.2.1-rc.3",
-    "@deepseek-ai/dsh-host-webserver": "0.2.1-rc.3",
-    "@deepseek-ai/dsh-llm": "0.2.1-rc.3",
-    "@deepseek-ai/dsh-llm-pi-ai": "0.2.1-rc.3",
-    "@deepseek-ai/dsh-settings": "0.2.1-rc.3",
-    "@deepseek-ai/schemastery": "3.18.5",
-    "@earendil-works/pi-ai": "1.1.0",
-    "@types/node": "^22.20.0",
-    "@types/react": "18.3.12",
-    "@types/react-dom": "18.3.1",
-    "react": "18.3.1",
-    "react-dom": "18.3.1",
-    "tsdown": "^0.22.2",
-    "typescript": "^5.9.3",
-    "vitest": "^4.1.8"
-  },
-  "dsh": {
-    "bundle": {
-      "patch": "./cordis.patch.yml"
-    },
-    "client": {
-      "inject": [
-        "@deepseek-ai/dsh-client-ui-settings",
-        "@deepseek-ai/dsh-client-ui-slots",
-        "@deepseek-ai/dsh-client-ui-settings-plugins",
-        "@deepseek-ai/dsh-client-locale"
-      ],
-      "platform": "web"
-    }
-  }
+    "name":  "dsh-model-hub",
+    "displayName":  "DSH Model Hub",
+    "description":  "把 WorkBuddy / ZCode / Qoder CN 的模型统一接入 DeepSeek Harness，带账号管理与请求记录",
+    "version":  "0.1.0",
+    "license":  "MIT",
+    "type":  "module",
+    "engines":  {
+                    "node":  "^22.19.0 || \u003e=24.0.0"
+                },
+    "main":  "lib/index.js",
+    "types":  "lib/index.d.ts",
+    "exports":  {
+                    ".":  {
+                              "types":  "./lib/index.d.ts",
+                              "default":  "./lib/index.js"
+                          },
+                    "./client":  "./client.js",
+                    "./cordis.patch.yml":  "./cordis.patch.yml",
+                    "./package.json":  "./package.json"
+                },
+    "files":  [
+                  "lib",
+                  "client.js",
+                  "cordis.patch.yml",
+                  "README.md"
+              ],
+    "scripts":  {
+                    "build":  "tsdown",
+                    "test":  "vitest run",
+                    "typecheck":  "tsc -p tsconfig.json --noEmit"
+                },
+    "dependencies":  {
+                         "@deepseek-ai/schemastery":  "3.18.5"
+                     },
+    "peerDependencies":  {
+                             "@deepseek-ai/cordis":  "\u003e=4.0.1-rc.1 \u003c5.0.0",
+                             "@deepseek-ai/dsh-atomic-write":  "\u003e=0.1.7-rc.1 \u003c0.3.0-0",
+                             "@deepseek-ai/dsh-home-paths":  "\u003e=0.1.7-rc.1 \u003c0.3.0-0",
+                             "@deepseek-ai/dsh-host-webserver":  "\u003e=0.1.7-rc.1 \u003c0.3.0-0",
+                             "@deepseek-ai/dsh-llm":  "\u003e=0.1.7-rc.1 \u003c0.3.0-0",
+                             "@deepseek-ai/dsh-llm-pi-ai":  "\u003e=0.1.7-rc.1 \u003c0.3.0-0",
+                             "@deepseek-ai/dsh-settings":  "\u003e=0.1.7-rc.1 \u003c0.3.0-0",
+                             "@earendil-works/pi-ai":  "\u003e=0.85.0 \u003c0.88.0 || \u003e=1.0.0-0 \u003c2.0.0"
+                         },
+    "devDependencies":  {
+                            "@deepseek-ai/cordis":  "4.0.5",
+                            "@deepseek-ai/dsh-home-paths":  "0.2.1-rc.3",
+                            "@deepseek-ai/dsh-host-webserver":  "0.2.1-rc.3",
+                            "@deepseek-ai/dsh-llm":  "0.2.1-rc.3",
+                            "@deepseek-ai/dsh-llm-pi-ai":  "0.2.1-rc.3",
+                            "@deepseek-ai/dsh-settings":  "0.2.1-rc.3",
+                            "@deepseek-ai/schemastery":  "3.18.5",
+                            "@earendil-works/pi-ai":  "1.1.0",
+                            "@types/node":  "^22.20.0",
+                            "@types/react":  "18.3.12",
+                            "@types/react-dom":  "18.3.1",
+                            "react":  "18.3.1",
+                            "react-dom":  "18.3.1",
+                            "tsdown":  "^0.22.2",
+                            "typescript":  "^5.9.3",
+                            "vitest":  "^4.1.8"
+                        },
+    "dsh":  {
+                "bundle":  {
+                               "patch":  "./cordis.patch.yml"
+                           },
+                "client":  {
+                               "inject":  [
+                                              "@deepseek-ai/dsh-client-ui-settings",
+                                              "@deepseek-ai/dsh-client-ui-slots",
+                                              "@deepseek-ai/dsh-client-ui-settings-plugins",
+                                              "@deepseek-ai/dsh-client-locale"
+                                          ],
+                               "platform":  "web"
+                           }
+            }
 }

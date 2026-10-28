@@ -15,4 +15,12 @@ export interface ChannelModel {
   maxTokens: number;
   creditMultiplier: number;
   supportsImages: boolean;
+  /** 上游给的活动标记文案，如 `Free now`。没有就不带。 */
+  promotionBadge?: string;
+  /** 上游给的等级标记文案，如 `Pro Only`。没有就不带。 */
+  tierBadge?: string;
+  /** 活动标记的颜色（CSS 颜色字面量），供浏览器侧画彩色 pill。 */
+  promotionColor?: string;
+  /** 等级标记的颜色。 */
+  tierColor?: string;
 }

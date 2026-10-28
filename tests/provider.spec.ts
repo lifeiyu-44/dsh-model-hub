@@ -70,9 +70,12 @@ describe("createHubAdapter —— 产出的 provider 必须真的能出模型", 
     await expect(adapterFor([]).listModels(PROVIDER)).resolves.toEqual([]);
   });
 
-  it("支持图片的模型声明 image 输入模态", async () => {
+  it("即使上游说 supportsImages，也只声明纯文本", async () => {
+    // 实测（2026-10-28）：声明 image 后用户贴图会以
+    // `pi-ai image input requires the durable attachment service` 让整轮失败，
+    // 因为 adapter 没接 resolveAttachments。宣称做不到的能力比不宣称更糟。
     const withImage: HubModel[] = [{ ...MODELS[0]!, supportsImages: true }];
     const listed = await adapterFor(withImage).listModels(PROVIDER);
-    expect(listed[0]?.inputModalities).toEqual(["text", "image"]);
+    expect(listed[0]?.inputModalities).toEqual(["text"]);
   });
 });

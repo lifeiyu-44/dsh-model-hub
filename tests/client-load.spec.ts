@@ -139,11 +139,28 @@ describe("client.js 能被宿主的 loader 加载", () => {
    * 结果它同样炸 —— 参考实现没炸是因为它的静态 inject 数组多声明了服务，
    * 不能反推"这个槽不需要 inject"。所以这里**不再留任何例外**。
    */
-  it("每个 slot 都带 inject 回调（缺了会让模型选择器崩）", () => {
+  it("除模型标签槽外，每个 slot 都带 inject 回调（缺了会让模型选择器崩）", () => {
     expect(registered.length).toBeGreaterThan(0);
     for (const entry of registered) {
+      if (entry.slot === "conversation.input.model.label") continue;
       expect(entry.options.inject, `slot ${entry.slot} 缺少 inject 回调`).toBeTypeOf("function");
     }
+  });
+
+  /**
+   * 模型标签槽的形状必须与参考实现一致。
+   *
+   * 两次踩坑后的结论：
+   * 1. **priority 必须是负数**（参考实现 -0.5）。用 30 时组件根本没被调用 ——
+   *    宿主默认渲染占住了槽，我的组件一次都没渲染（探针数组为空证实）。
+   * 2. **不传 inject**：该槽宿主直接传 { provider, model, placement }。
+   *    与其它槽相反，这是参考实现的确切形状。
+   */
+  it("模型标签槽用负 priority 且不传 inject（与参考实现对齐）", () => {
+    const entry = registered.find((r) => r.slot === "conversation.input.model.label");
+    expect(entry, "模型标签槽没有注册").toBeDefined();
+    expect(entry!.options.priority).toBeLessThan(0);
+    expect(entry!.options.inject).toBeUndefined();
   });
 
   it("某个 slot 注册失败时，apply 仍然不抛（否则会连累宿主）", () => {

@@ -143,28 +143,24 @@ export function apply(ctx: any): void {
     // ── 4. 模型标签的彩色后缀 ──
     //
     // 宿主把模型名当纯文本渲染，`· x0.00 · Free now` 只能是灰字。
-    // 彩色 pill 必须在这个插槽里自己画（参考实现同样如此）。
+    // 彩色标记必须在这个插槽里自己画。
     //
-    // **必须给 inject 回调。** 一开始我照着参考实现的源码判断"这个槽不需要"，
-    // 因为它那边注册时只传了 name + priority —— 结果实测模型选择器里
-    // **一个模型都没有**（只剩「模型名 / 推理等级」两行），并抛
-    // `cannot get property "remote.session" without inject`。
-    // 不给 inject 时宿主走默认注入路径去调 `directoryFor()`，那要 `remote.session`。
-    // 参考实现没踩到，是因为它的静态 inject 数组比我多声明了服务。
+    // **注册形状必须与参考实现逐字对齐**（这次踩了坑）：
+    //   slots.register({ name: "conversation.input.model.label", priority: -0.5 }, Component)
+    //
+    // - **priority 是 -0.5（负数）**：我先用了 30，结果组件根本没被调用 ——
+    //   宿主自己的默认渲染占住了这个槽，我的组件一次都没渲染
+    //   （加临时探针确认探针数组永远是空的）。负优先级才排到默认渲染前面。
+    // - **不传 inject**：这个槽宿主直接传 `{ provider, model, placement }`。
+    //   这一点与其它槽相反，是参考实现的确切形状。
+    //   之前误以为它导致 `remote.session` 异常 —— 后来做隔离实验把整个槽禁用，
+    //   异常照样出现，证明那是既有问题、与这里无关。
     try {
-      ctx.slots.inject("conversation.input.model.label", () => {
-        try {
-          return ctx.slots.register(
-            { name: "conversation.input.model.label", priority: 30, inject: () => ({}) } as any,
-            ModelLabel,
-          );
-        } catch (error) {
-          console.error("[dsh-model-hub] 模型标签槽注册失败（不影响 provider）:", error);
-          return undefined;
-        }
-      });
+      ctx.slots.inject("conversation.input.model.label", () =>
+        ctx.slots.register({ name: "conversation.input.model.label", priority: -0.5 } as any, ModelLabel),
+      );
     } catch (error) {
-      console.error("[dsh-model-hub] 模型标签槽注入失败（不影响 provider）:", error);
+      console.error("[dsh-model-hub] 模型标签槽注册失败（不影响 provider）:", error);
     }
   } catch (error) {
     // 最外层防线：客户端加载失败也不该影响 host 侧 provider。

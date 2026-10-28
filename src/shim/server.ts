@@ -7,6 +7,14 @@ import { ensureSystemHead } from "./prepare.js";
 export interface ShimDeps {
   /** 上游地址与请求头，由渠道后端提供。 */
   prepare(): Promise<{ baseUrl: string; headers: Record<string, string> }>;
+  /**
+   * 可选：协议方言。
+   *
+   * WorkBuddy 是 OpenAI 兼容直通，不需要它；Qoder 需要两层改写
+   * （请求体自定义编码 + 双层 SSE 解包），就通过这个钩子注入。
+   * 不给时行为与以前完全一致 —— 现有渠道不受影响。
+   */
+  dialect?: ShimDialect;
   /** 记录一次完成的请求。抛错不得影响响应。 */
   record(input: {
     metrics: TurnMetrics;
@@ -15,6 +23,25 @@ export interface ShimDeps {
     isStreaming: boolean;
     model: string;
   }): void;
+}
+
+export interface ShimDialect {
+  /**
+   * 构造最终请求。返回的 `body` 已经是可以直接发出去的字节。
+   *
+   * 默认实现是 `<baseUrl>/v2/chat/completions` + 原样 body。
+   */
+  request?(input: {
+    raw: string;
+    model: string;
+    baseUrl: string;
+    headers: Record<string, string>;
+  }): Promise<{ url: string; headers: Record<string, string>; body: string | Buffer }>;
+  /**
+   * 把上游的一行 SSE 翻成标准 OpenAI SSE 行；返回 `null` 表示丢弃这一行。
+   * 不给就原样透传（当前 WorkBuddy 的行为）。
+   */
+  decodeLine?(line: string): string | null;
 }
 
 export interface ShimHandle {
@@ -105,10 +132,20 @@ export async function startShim(deps: ShimDeps): Promise<ShimHandle> {
       const body = ensureSystemHead(raw);
 
       const { baseUrl, headers } = await deps.prepare();
-      const upstream = await fetch(`${baseUrl}/v2/chat/completions`, {
+
+      // 方言钩子存在时由它决定 URL / 头 / 请求体（Qoder 要编码请求体并重签名）；
+      // 否则维持原行为。
+      const built =
+        deps.dialect?.request === undefined
+          ? { url: `${baseUrl}/v2/chat/completions`, headers: { ...headers, "content-type": "application/json" }, body }
+          : await deps.dialect.request({ raw: body, model, baseUrl, headers });
+
+      const upstream = await fetch(built.url, {
         method: "POST",
-        headers: { ...headers, "content-type": "application/json" },
-        body,
+        headers: built.headers,
+        // Buffer 不是合法的 BodyInit（TS 的 DOM 类型不认 Node 的 Buffer），
+        // 但运行时 undici 完全接受 Uint8Array —— 转一下即可，不改字节。
+        body: typeof built.body === "string" ? built.body : new Uint8Array(built.body),
       });
       timer.onUpstreamHead(Date.now());
       statusCode = upstream.status;
@@ -135,20 +172,39 @@ export async function startShim(deps: ShimDeps): Promise<ShimHandle> {
       const reader = upstream.body.getReader();
       const decoder = new TextDecoder();
       let buffer = "";
+      const decodeLine = deps.dialect?.decodeLine;
       for (;;) {
         const { done, value } = await reader.read();
         if (done) break;
         const chunk = decoder.decode(value, { stream: true });
-        res.write(chunk);
+
+        // 有方言解码时**不能**整块透传：上游是双层信封，必须逐行翻成标准 SSE。
+        if (!streaming || decodeLine === undefined) res.write(chunk);
         if (!streaming) continue;
+
         buffer += chunk;
         let nl = buffer.indexOf("\n");
         while (nl >= 0) {
           const line = buffer.slice(0, nl);
           buffer = buffer.slice(nl + 1);
-          const parsed = parseSseLine(line);
-          if (parsed.text !== undefined) timer.onDelta(parsed.text, Date.now());
-          if (parsed.usage !== undefined) usage = parsed.usage;
+
+          if (decodeLine === undefined) {
+            const parsed = parseSseLine(line);
+            if (parsed.text !== undefined) timer.onDelta(parsed.text, Date.now());
+            if (parsed.usage !== undefined) usage = parsed.usage;
+            nl = buffer.indexOf("\n");
+            continue;
+          }
+
+          // 方言模式：翻一行、写一行、再从**翻好的**那行里量指标，
+          // 这样记录表里的 token/速度与用户看到的完全一致。
+          const translated = decodeLine(line);
+          if (translated !== null) {
+            res.write(`${translated}\n\n`);
+            const parsed = parseSseLine(translated);
+            if (parsed.text !== undefined) timer.onDelta(parsed.text, Date.now());
+            if (parsed.usage !== undefined) usage = parsed.usage;
+          }
           nl = buffer.indexOf("\n");
         }
       }

@@ -87,6 +87,7 @@ function rateColor(rate: number): string {
 }
 
 export function ModelLabel(props: Record<string, any>): React.ReactElement {
+
   // 宿主的传参形状实测有几种，全部兼容
   const modelId: string = props?.model?.id ?? props?.modelId ?? props?.model?.modelId ?? "";
   const fallbackName: string = props?.model?.name ?? modelId;

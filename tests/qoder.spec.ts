@@ -220,3 +220,393 @@ describe("live: PAT → jobToken → 目录", () => {
     console.log(`[qoder live] ${result.models.length} 个模型: ${ids.slice(0, 6).join(", ")} …`);
   }, 60_000);
 });
+describe("buildQoderChatBody —— OpenAI 请求翻成 Qoder 请求", () => {
+  it("模型 id 放在 model_config.key，不在顶层 model", async () => {
+    const { buildQoderChatBody } = await import("../src/channels/qoder/chat.js");
+    const body = buildQoderChatBody({ model: "auto", messages: [{ role: "user", content: "hi" }] }, "qfmodel");
+    expect((body.model_config as Record<string, unknown>).key).toBe("qfmodel");
+    expect(body.model).toBeUndefined();
+  });
+
+  it("三个 id 字段同源（服务端靠它们串起一次会话）", async () => {
+    const { buildQoderChatBody } = await import("../src/channels/qoder/chat.js");
+    const body = buildQoderChatBody({ messages: [] }, "auto");
+    expect(body.request_id).toBe(body.request_set_id);
+    expect(body.request_id).toBe(body.chat_record_id);
+  });
+
+  it("messages 原样透传（system 走 messages，不用顶层 system）", async () => {
+    const { buildQoderChatBody } = await import("../src/channels/qoder/chat.js");
+    const messages = [
+      { role: "system", content: "you are helpful" },
+      { role: "user", content: "hi" },
+    ];
+    const body = buildQoderChatBody({ messages }, "auto");
+    expect(body.messages).toEqual(messages);
+    expect(body.system).toBe("");
+  });
+
+  it("max_tokens / temperature 进 parameters", async () => {
+    const { buildQoderChatBody } = await import("../src/channels/qoder/chat.js");
+    const body = buildQoderChatBody({ max_tokens: 256, temperature: 0.3 }, "auto");
+    const parameters = body.parameters as Record<string, unknown>;
+    expect(parameters.max_tokens).toBe(256);
+    expect(parameters.temperature).toBe(0.3);
+  });
+
+  it("没有 max_tokens 时不塞这个字段（交给服务端默认）", async () => {
+    const { buildQoderChatBody } = await import("../src/channels/qoder/chat.js");
+    const body = buildQoderChatBody({}, "auto");
+    expect((body.parameters as Record<string, unknown>).max_tokens).toBeUndefined();
+  });
+
+  it("prompt 文本取自最后一条 user 消息，并进 business.name / chat_context.text", async () => {
+    const { buildQoderChatBody } = await import("../src/channels/qoder/chat.js");
+    const body = buildQoderChatBody(
+      { messages: [{ role: "user", content: "第一个" }, { role: "assistant", content: "答" }, { role: "user", content: "最后的问题" }] },
+      "auto",
+    );
+    expect((body.business as Record<string, unknown>).name).toBe("最后的问题");
+    expect((body.chat_context as Record<string, unknown>).text).toBe("最后的问题");
+  });
+
+  it("多段 content 只取 text 部分", async () => {
+    const { buildQoderChatBody } = await import("../src/channels/qoder/chat.js");
+    const body = buildQoderChatBody(
+      { messages: [{ role: "user", content: [{ type: "text", text: "图里是什么" }, { type: "image_url", image_url: { url: "x" } }] }] },
+      "auto",
+    );
+    expect((body.chat_context as Record<string, unknown>).text).toBe("图里是什么");
+  });
+
+  it("stream 恒为 true（Qoder 只支持流式）", async () => {
+    const { buildQoderChatBody } = await import("../src/channels/qoder/chat.js");
+    expect(buildQoderChatBody({}, "auto").stream).toBe(true);
+  });
+});
+
+describe("unwrapQoderEvent / decodeQoderLine —— 双层 SSE", () => {
+  const envelope = (inner: unknown) => JSON.stringify({ statusCodeValue: 200, statusCode: "OK", body: typeof inner === "string" ? inner : JSON.stringify(inner) });
+
+  it("解开信封得到内层 chunk", async () => {
+    const { unwrapQoderEvent } = await import("../src/channels/qoder/chat.js");
+    const result = unwrapQoderEvent(envelope({ choices: [{ delta: { content: "你好" } }] }));
+    expect(result.kind).toBe("chunk");
+  });
+
+  it("[DONE] 哨兵（顶层与信封内都能识别）", async () => {
+    const { unwrapQoderEvent } = await import("../src/channels/qoder/chat.js");
+    expect(unwrapQoderEvent("[DONE]").kind).toBe("done");
+    expect(unwrapQoderEvent(envelope("[DONE]")).kind).toBe("done");
+  });
+
+  it("EXCEED_QUOTA 变成错误而不是正文", async () => {
+    const { unwrapQoderEvent } = await import("../src/channels/qoder/chat.js");
+    const result = unwrapQoderEvent("[EXCEED_QUOTA] whatever");
+    expect(result.kind).toBe("error");
+    expect((result as { message: string }).message).toContain("额度");
+  });
+
+  it("NOTIFICATIONS / 配额未超 都丢弃", async () => {
+    const { unwrapQoderEvent } = await import("../src/channels/qoder/chat.js");
+    expect(unwrapQoderEvent("[NOTIFICATIONS] x").kind).toBe("ignore");
+    expect(unwrapQoderEvent("[NOT_EXCEED_QUOTA]").kind).toBe("ignore");
+  });
+
+  it("statusCodeValue 非 200 时报错并带原文", async () => {
+    const { unwrapQoderEvent } = await import("../src/channels/qoder/chat.js");
+    const result = unwrapQoderEvent(JSON.stringify({ statusCodeValue: 500, body: "boom" }));
+    expect(result.kind).toBe("error");
+    expect((result as { message: string }).message).toContain("boom");
+  });
+
+  it("解码一行 data: 得到标准 OpenAI SSE 行", async () => {
+    const { decodeQoderLine } = await import("../src/channels/qoder/chat.js");
+    const out = decodeQoderLine(`data:${envelope({ choices: [{ delta: { content: "hi" } }] })}`);
+    expect(out).toMatch(/^data: \{/);
+    const parsed = JSON.parse(out!.slice(5));
+    expect(parsed.choices[0].delta.content).toBe("hi");
+  });
+
+  it("空行 / event: 行 / 注释被丢弃", async () => {
+    const { decodeQoderLine } = await import("../src/channels/qoder/chat.js");
+    expect(decodeQoderLine("")).toBeNull();
+    expect(decodeQoderLine("event: message")).toBeNull();
+    expect(decodeQoderLine(": keep-alive")).toBeNull();
+  });
+
+  it("结束行翻成 data: [DONE]", async () => {
+    const { decodeQoderLine } = await import("../src/channels/qoder/chat.js");
+    expect(decodeQoderLine(`data:${envelope("[DONE]")}`)).toBe("data: [DONE]");
+  });
+
+  it("业务错误翻成 error chunk（不把哨兵当正文）", async () => {
+    const { decodeQoderLine } = await import("../src/channels/qoder/chat.js");
+    const out = decodeQoderLine("data:[EXCEED_QUOTA] nope");
+    const parsed = JSON.parse(out!.slice(5));
+    expect(parsed.error.type).toBe("qoder_error");
+  });
+});
+/**
+ * 端到端实测：起本插件的 shim（带 Qoder 方言）→ 发一次 OpenAI 形状的请求
+ * → 校验拿回的是**标准 OpenAI SSE**（不是 Qoder 的双层信封）。
+ *
+ * 这条用例证明的是"接进 DSH 之后能真的用"，而不只是"协议函数没写错"。
+ * 没有 PAT 的机器自动跳过。
+ */
+describe("live e2e: 经 shim 发一次真实对话", () => {
+  it("拿到标准 OpenAI SSE 且含正文", async () => {
+    const { readPat, createSessionManager } = await import("../src/channels/qoder/credentials.js");
+    const { fetchQoderCatalog } = await import("../src/channels/qoder/catalog.js");
+    const { createQoderDialect } = await import("../src/channels/qoder/chat.js");
+    const { startShim } = await import("../src/shim/server.js");
+
+    if (readPat() === undefined) {
+      console.log("[qoder e2e] 本机没有 PAT，跳过");
+      return;
+    }
+
+    const sessions = createSessionManager();
+    const session = await sessions.current();
+    expect(session, "PAT 存在但换不到 jobToken").toBeDefined();
+
+    const catalog = await fetchQoderCatalog(session!);
+    expect(catalog.error).toBeUndefined();
+    // 用免费模型，避免消耗额度
+    const model = catalog.models.find((m) => m.creditMultiplier === 0) ?? catalog.models[0]!;
+
+    const recorded: { model: string; statusCode: number }[] = [];
+    const shim = await startShim({
+      prepare: async () => ({ baseUrl: "https://unused.invalid", headers: {} }),
+      dialect: createQoderDialect({ session: () => sessions.current() }),
+      record: (input) => {
+        recorded.push({ model: input.model, statusCode: input.statusCode });
+      },
+    });
+
+    try {
+      const response = await fetch(`${shim.baseUrl()}/v1/chat/completions`, {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: `Bearer ${shim.token()}` },
+        body: JSON.stringify({
+          model: model.id,
+          stream: true,
+          max_tokens: 32,
+          messages: [{ role: "user", content: "只回答两个字：你好" }],
+        }),
+        signal: AbortSignal.timeout(90_000),
+      });
+      expect(response.status).toBe(200);
+      expect(response.headers.get("content-type") ?? "").toContain("text/event-stream");
+
+      const text = await response.text();
+      // 上游容量/限流不属于本插件的缺陷（免费模型被高频使用时会 429）
+      if (/429|All backends failed|capacity/i.test(text)) {
+        console.log("[qoder e2e] 上游限流（429/All backends failed），本次跳过断言");
+        return;
+      }
+      // 关键：吐出来的必须已经是标准 SSE，不能残留 Qoder 的 statusCodeValue 信封
+      expect(text).not.toContain("statusCodeValue");
+      expect(text).toContain("[DONE]");
+
+      const contents: string[] = [];
+      for (const line of text.split("\n")) {
+        if (!line.startsWith("data: ")) continue;
+        const payload = line.slice(6);
+        if (payload === "[DONE]") continue;
+        try {
+          const chunk = JSON.parse(payload) as { choices?: { delta?: { content?: string } }[] };
+          const content = chunk.choices?.[0]?.delta?.content;
+          if (typeof content === "string" && content !== "") contents.push(content);
+        } catch {
+          /* 忽略非 JSON */
+        }
+      }
+      const answer = contents.join("");
+      console.log(`[qoder e2e] model=${model.id} 回答="${answer.slice(0, 40)}"`);
+      if (answer.length === 0 && /429|All backends failed|capacity/i.test(text)) {
+        console.log("[qoder e2e] 上游限流（429/All backends failed），本次跳过断言");
+        return;
+      }
+      expect(answer.length).toBeGreaterThan(0);
+    } finally {
+      shim.close();
+    }
+  }, 120_000);
+});
+/**
+ * Qoder 模型必须能真的出到 adapter。
+ *
+ * 「provider 在 listProviders 里」不等于「模型可选」—— 这个坑本项目栽过：
+ * 传错形状时 provider 注册成功但模型列表是空的。这里用真实的 Qoder 目录条目
+ * 过一遍 `createHubAdapter`，把「能不能出模型」钉死。
+ */
+describe("Qoder 模型能出到 adapter", () => {
+  it("listModels 返回全部条目，id/name 与目录一致", async () => {
+    const { createHubAdapter } = await import("../src/provider.js");
+    const { createProvider } = await import("@earendil-works/pi-ai");
+    const { openAICompletionsApi } = await import("@earendil-works/pi-ai/api/openai-completions.lazy");
+    const { resolveRetryPolicy } = await import("@deepseek-ai/dsh-llm");
+    const { PiAiAdapter } = await import("@deepseek-ai/dsh-llm-pi-ai");
+
+    const models = [
+      { id: "auto", name: "Auto", contextWindow: 200_000, maxTokens: 8_192, creditMultiplier: 0.5, supportsImages: true },
+      { id: "qfmodel", name: "Qfree", contextWindow: 128_000, maxTokens: 8_192, creditMultiplier: 0, supportsImages: false },
+    ];
+
+    const adapter = createHubAdapter({
+      provider: "hub-qoder-cn",
+      shimBaseUrl: "http://127.0.0.1:1",
+      shimToken: "t".repeat(32),
+      models,
+      createProvider,
+      openAICompletionsApi,
+      resolveRetryPolicy,
+      PiAiAdapter,
+    });
+
+    const listed = await adapter.listModels("hub-qoder-cn");
+    expect(listed.map((m: { id: string }) => m.id)).toEqual(["auto", "qfmodel"]);
+    // 名字带倍率后缀（彩色标记在客户端再加），id 必须原样
+    expect(listed[0].name).toContain("Auto");
+    expect(listed[0].name).toContain("0.50");
+  });
+});
+describe("sanitizeMessages —— 断链历史规整", () => {
+  const sys = { role: "system", content: "s" };
+  const user = (t: string) => ({ role: "user", content: t });
+  const assistantCall = (id: string) => ({ role: "assistant", content: "", tool_calls: [{ id, type: "function", function: { name: "f", arguments: "{}" } }] });
+  const toolMsg = (id: string) => ({ role: "tool", tool_call_id: id, content: "ok" });
+
+  it("配对的 tool_calls + tool 消息原样保留", async () => {
+    const { sanitizeMessages } = await import("../src/channels/qoder/chat.js");
+    const input = [sys, user("go"), assistantCall("a1"), toolMsg("a1"), user("next")];
+    expect(sanitizeMessages(input)).toEqual(input);
+  });
+
+  it("孤立 tool 消息被丢弃（复现上游 400 的场景）", async () => {
+    const { sanitizeMessages } = await import("../src/channels/qoder/chat.js");
+    const input = [sys, user("go"), toolMsg("orphan"), user("next")];
+    const out = sanitizeMessages(input);
+    expect(out.some((m) => m.role === "tool")).toBe(false);
+    expect(out.map((m) => m.role)).toEqual(["system", "user", "user"]);
+  });
+
+  it("没人应答的 tool_calls 字段被裁掉，消息本身保留", async () => {
+    const { sanitizeMessages } = await import("../src/channels/qoder/chat.js");
+    const input = [user("go"), assistantCall("a1"), user("next")];
+    const out = sanitizeMessages(input);
+    const assistant = out.find((m) => m.role === "assistant")!;
+    expect(assistant).toBeDefined();
+    expect(assistant.tool_calls).toBeUndefined();
+  });
+
+  it("多个 tool_calls 只保留有响应的那些", async () => {
+    const { sanitizeMessages } = await import("../src/channels/qoder/chat.js");
+    const input = [
+      user("go"),
+      { role: "assistant", content: "", tool_calls: [
+        { id: "a1", type: "function", function: { name: "f", arguments: "{}" } },
+        { id: "a2", type: "function", function: { name: "g", arguments: "{}" } },
+      ] },
+      toolMsg("a1"),
+      user("next"),
+    ];
+    const out = sanitizeMessages(input);
+    const assistant = out.find((m) => m.role === "assistant")!;
+    expect((assistant.tool_calls as { id: string }[]).map((c) => c.id)).toEqual(["a1"]);
+    expect(out.filter((m) => m.role === "tool").map((m) => m.tool_call_id)).toEqual(["a1"]);
+  });
+
+  it("跨轮的同名 id 不被认（user 消息重置声明状态）", async () => {
+    const { sanitizeMessages } = await import("../src/channels/qoder/chat.js");
+    const input = [user("a"), assistantCall("x"), toolMsg("x"), user("b"), toolMsg("x")];
+    const out = sanitizeMessages(input);
+    // 第二轮的 tool 消息属于断链，应被丢弃；第一轮的保留
+    expect(out.filter((m) => m.role === "tool").length).toBe(1);
+  });
+
+  it("非数组输入返回空数组（不抛）", async () => {
+    const { sanitizeMessages } = await import("../src/channels/qoder/chat.js");
+    expect(sanitizeMessages(undefined)).toEqual([]);
+    expect(sanitizeMessages("x")).toEqual([]);
+  });
+});
+/**
+ * 真实回归：**带断链历史**（孤立 tool 消息）也要能成功。
+ *
+ * 这是用户实测报的那个 400 的复现路径：
+ *   Messages with role 'tool' must be a response to a preceding message with 'tool_calls'
+ *
+ * 如果不做 sanitizeMessages，这条用例会拿回 error chunk。
+ */
+describe("live: 断链历史不再 400", () => {
+  it("孤立 tool 消息被裁掉后请求成功", async () => {
+    const { readPat, createSessionManager } = await import("../src/channels/qoder/credentials.js");
+    const { fetchQoderCatalog } = await import("../src/channels/qoder/catalog.js");
+    const { createQoderDialect } = await import("../src/channels/qoder/chat.js");
+    const { startShim } = await import("../src/shim/server.js");
+
+    if (readPat() === undefined) {
+      console.log("[qoder 断链] 本机没有 PAT，跳过");
+      return;
+    }
+
+    const sessions = createSessionManager();
+    const session = await sessions.current();
+    const catalog = await fetchQoderCatalog(session!);
+    const model = catalog.models.find((m) => m.creditMultiplier === 0) ?? catalog.models[0]!;
+
+    const shim = await startShim({
+      prepare: async () => ({ baseUrl: "https://unused.invalid", headers: {} }),
+      dialect: createQoderDialect({ session: () => sessions.current() }),
+      record: () => {},
+    });
+
+    try {
+      const response = await fetch(`${shim.baseUrl()}/v1/chat/completions`, {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: `Bearer ${shim.token()}` },
+        body: JSON.stringify({
+          model: model.id,
+          stream: true,
+          max_tokens: 24,
+          messages: [
+            { role: "system", content: "You are a helpful assistant." },
+            // 断链：这条 tool 消息前面没有 assistant tool_calls
+            { role: "tool", tool_call_id: "call_does_not_exist", content: "残留的工具结果" },
+            { role: "user", content: "只回答两个字：你好" },
+          ],
+        }),
+        signal: AbortSignal.timeout(90_000),
+      });
+
+      const text = await response.text();
+      const contents: string[] = [];
+      let sawError = false;
+      for (const line of text.split("\n")) {
+        if (!line.startsWith("data: ")) continue;
+        const payload = line.slice(6);
+        if (payload === "[DONE]") continue;
+        try {
+          const chunk = JSON.parse(payload) as { choices?: { delta?: { content?: string } }[]; error?: { message?: string } };
+          if (chunk.error !== undefined) sawError = true;
+          const content = chunk.choices?.[0]?.delta?.content;
+          if (typeof content === "string" && content !== "") contents.push(content);
+        } catch {
+          /* ignore */
+        }
+      }
+      const answer = contents.join("");
+      console.log(`[qoder 断链] 回答="${answer.slice(0, 30)}" sawError=${sawError}`);
+      if (sawError && /429|All backends failed|capacity/i.test(text)) {
+        console.log("[qoder 断链] 上游限流（429/All backends failed），本次跳过断言");
+        return;
+      }
+      expect(sawError, "仍然出现 error chunk（sanitize 没生效？）").toBe(false);
+      expect(answer.length).toBeGreaterThan(0);
+    } finally {
+      shim.close();
+    }
+  }, 120_000);
+});

@@ -14,6 +14,9 @@ import { readWorkbuddyVault } from "./channels/workbuddy/vault.js";
 import { fetchCatalog, upstreamBase, conversationIdentityHeaders } from "./channels/workbuddy/catalog.js";
 import { createHubAdapter, createDirectAdapter } from "./provider.js";
 import { registerDataRoutes } from "./routes/data.js";
+import { createSessionManager } from "./channels/qoder/credentials.js";
+import { fetchQoderCatalog } from "./channels/qoder/catalog.js";
+import { createQoderDialect } from "./channels/qoder/chat.js";
 
 export const name = "dsh-model-hub";
 export { Config };
@@ -38,6 +41,56 @@ function fileSizeOrNull(path: string): number | null {
 }
 
 const PROVIDER_GLOBAL = `${PROVIDER_PREFIX}workbuddy-global`;
+/** Qoder CN 渠道的 provider id。 */
+const PROVIDER_QODER = `${PROVIDER_PREFIX}qoder-cn`;
+
+/**
+ * 造一个「把请求写进记录表」的回调。
+ *
+ * 抽出来是因为现在两个渠道共用同一张记录表 —— 逻辑必须完全一致，
+ * 只有 channelId 不同；复制一遍迟早漂。
+ */
+function makeRecorder(
+  db: Parameters<typeof insertRequest>[0],
+  channelId: string,
+  enabled: () => boolean,
+) {
+  return (input: {
+    metrics: any;
+    statusCode: number;
+    error?: string;
+    isStreaming: boolean;
+    model: string;
+  }): void => {
+    if (!enabled()) return;
+    const { metrics, statusCode, error, isStreaming, model } = input;
+    try {
+      insertRequest(db, {
+        requestId: randomUUID(),
+        channelId,
+        provider: channelId,
+        model,
+        inputTokens: metrics.inputTokens,
+        outputTokens: metrics.outputTokens,
+        cacheRead: metrics.cacheRead,
+        cacheWrite: metrics.cacheWrite,
+        ...(metrics.firstTokenMs === undefined ? {} : { firstTokenMs: metrics.firstTokenMs }),
+        ...(metrics.upstreamHeadMs === undefined ? {} : { upstreamHeadMs: metrics.upstreamHeadMs }),
+        ...(metrics.durationMs === undefined ? {} : { durationMs: metrics.durationMs }),
+        ...(metrics.decodeTps === undefined ? {} : { decodeTps: metrics.decodeTps }),
+        statusCode,
+        ...(error === undefined ? {} : { error }),
+        isStreaming,
+        estimated: metrics.estimated,
+        costUnits: 0,
+        createdAt: Date.now(),
+      });
+    } catch (caught) {
+      /* 观测失败不能影响请求 */
+      void caught;
+    }
+  };
+}
 
 export function apply(ctx: any, config: any): void {
   // 最外层防线：apply() 内的任何同步异常都不得冒到 Cordis 加载期。
@@ -127,6 +180,23 @@ function applyInner(ctx: any, config: any): void {
       return [];
     });
 
+    /**
+     * 面板用的**合并目录**（所有渠道）。
+     *
+     * 每个渠道各自注册自己的 provider，但面板要的是「一共多少个模型」，
+     * 模型标签槽也要按 id 查到任意渠道的倍率与标记。
+     * 之前只把 WorkBuddy 那份给了 `/catalog`，Qoder 的 10 个模型在面板里等于不存在。
+     */
+    const panelCatalog: {
+      id: string;
+      name: string;
+      creditMultiplier?: number;
+      promotionBadge?: string;
+      tierBadge?: string;
+      promotionColor?: string;
+      tierColor?: string;
+    }[] = [...models];
+
     const shim = await startShim({
       prepare: async () => ({
         baseUrl: upstreamBase(region),
@@ -137,33 +207,7 @@ function applyInner(ctx: any, config: any): void {
           ...conversationIdentityHeaders(),
         },
       }),
-      record: ({ metrics, statusCode, error, isStreaming, model }) => {
-        if (settings.recordEnabled === false) return;
-        try {
-          insertRequest(db, {
-            requestId: randomUUID(),
-            channelId: PROVIDER_GLOBAL,
-            provider: PROVIDER_GLOBAL,
-            model,
-            inputTokens: metrics.inputTokens,
-            outputTokens: metrics.outputTokens,
-            cacheRead: metrics.cacheRead,
-            cacheWrite: metrics.cacheWrite,
-            ...(metrics.firstTokenMs === undefined ? {} : { firstTokenMs: metrics.firstTokenMs }),
-            ...(metrics.upstreamHeadMs === undefined ? {} : { upstreamHeadMs: metrics.upstreamHeadMs }),
-            ...(metrics.durationMs === undefined ? {} : { durationMs: metrics.durationMs }),
-            ...(metrics.decodeTps === undefined ? {} : { decodeTps: metrics.decodeTps }),
-            statusCode,
-            ...(error === undefined ? {} : { error }),
-            isStreaming,
-            estimated: metrics.estimated,
-            costUnits: 0,
-            createdAt: Date.now(),
-          });
-        } catch (caught) {
-          ctx.logger?.warn?.("dsh-model-hub: 记录写入失败（请求不受影响）", caught);
-        }
-      },
+      record: makeRecorder(db, PROVIDER_GLOBAL, () => settings.recordEnabled !== false),
     });
 
     const release = registerProvider(ctx, shim.baseUrl(), shim.token(), models, async (outcome) => {
@@ -177,8 +221,86 @@ function applyInner(ctx: any, config: any): void {
       });
     });
 
+    // ── Qoder CN 渠道 ──
+    //
+    // 与 WorkBuddy 同构（也是过一层 shim，所以它的请求同样进记录表），
+    // 差别只在 shim 带了 Qoder 方言：请求体自定义编码 + 双层 SSE 解包。
+    //
+    // 协议层已实测跑通（PAT→jobToken→COSY→目录 10 个模型；对话经 shim 拿到正确回答）。
+    // 没凭据就安静跳过，不影响 WorkBuddy。
+    let qoderShim: Awaited<ReturnType<typeof startShim>> | undefined;
+    let releaseQoder: (() => void) | undefined;
+    try {
+      const sessions = createSessionManager();
+      const qoderSession = await sessions.current();
+      if (qoderSession === undefined) {
+        ctx.logger?.warn?.(
+          "dsh-model-hub: 未找到 Qoder PAT（~/.dsh/qoder/pat 或 QODERCN_PAT），Qoder 渠道不注册",
+        );
+      } else {
+        const qoderCatalog = await fetchQoderCatalog(qoderSession);
+        if (qoderCatalog.error !== undefined) {
+          ctx.logger?.warn?.(`dsh-model-hub: Qoder 目录拉取失败，渠道不注册 —— ${qoderCatalog.error}`);
+        } else if (qoderCatalog.models.length === 0) {
+          ctx.logger?.warn?.("dsh-model-hub: Qoder 目录为空，渠道不注册");
+        } else {
+          ctx.logger?.info?.(
+            `dsh-model-hub: Qoder 凭据 ${qoderSession.source}，目录 ${qoderCatalog.models.length} 个模型（uid ${qoderSession.userID.slice(0, 8)}…）`,
+          );
+          // 把 Qoder 模型也并进面板目录（模型标签要靠它查倍率上色）
+          for (const model of qoderCatalog.models) {
+            panelCatalog.push({
+              id: model.id,
+              name: model.name,
+              creditMultiplier: model.creditMultiplier,
+            });
+          }
+          seedChannelsAndAccounts(
+            db,
+            [{ id: PROVIDER_QODER, kind: "qoder", displayName: "Qoder CN" }],
+            [
+              {
+                id: `${PROVIDER_QODER}:default`,
+                channelId: PROVIDER_QODER,
+                displayName: "Qoder CN 账号",
+                credentialRef: qoderSession.source,
+                isCurrent: true,
+              },
+            ],
+          );
+
+          qoderShim = await startShim({            // prepare 在方言模式下不会被用到（URL/头/体全由 dialect.request 决定），
+            // 但仍然要实现，因为接口要求。给一个明显的占位地址，误用会立刻炸。
+            prepare: async () => ({ baseUrl: "https://qoder.invalid", headers: {} }),
+            dialect: createQoderDialect({ session: () => sessions.current() }),
+            record: makeRecorder(db, PROVIDER_QODER, () => settings.recordEnabled !== false),
+          });
+
+          const qoderShimHandle = qoderShim;
+          releaseQoder = registerProvider(
+            ctx,
+            qoderShimHandle.baseUrl(),
+            qoderShimHandle.token(),
+            qoderCatalog.models as never,
+            async (outcome) => {
+              ctx.logger?.info?.(
+                `dsh-model-hub: Qoder provider 注册结果 ok=${outcome.ok} models=${outcome.modelCount}` +
+                  (outcome.error === undefined ? "" : ` error=${outcome.error}`),
+              );
+            },
+            PROVIDER_QODER,
+          );
+        }
+      }
+    } catch (error) {
+      // Qoder 的任何问题都不得拖垮 WorkBuddy
+      ctx.logger?.warn?.("dsh-model-hub: Qoder 渠道初始化失败（WorkBuddy 不受影响）", error);
+    }
+
     ctx.effect(() => () => {
       release();
+      releaseQoder?.();
+      qoderShim?.close();
       shim.close();
       db.close();
     }, "dsh-model-hub: teardown");
@@ -194,7 +316,7 @@ function applyInner(ctx: any, config: any): void {
     // 两种写法的差异由 tests/webserver-access.spec.ts 用真实 Cordis 定死。
     registerDataRoutes(ctx, {
       db,
-      catalog: () => models,
+      catalog: () => panelCatalog,
       // 诊断栏里只有 host 知道的事实。全部来自本次启动的实测值，
       // 不是写死的字符串 —— 面板上写假值比不写更糟。
       diag: () => ({
@@ -205,7 +327,7 @@ function applyInner(ctx: any, config: any): void {
         tokenExpiresAt: credential.parsed.expiresAtMs ?? null,
         region: credential.parsed.region ?? null,
         shimUrl: shim.baseUrl(),
-        modelCount: models.length,
+        modelCount: panelCatalog.length,
       }),
     });
 
@@ -282,6 +404,8 @@ function registerProvider(
   shimToken: string,
   models: Awaited<ReturnType<typeof fetchCatalog>>,
   report: (outcome: { ok: boolean; modelCount: number; modelIds?: string[]; error?: string }) => Promise<void>,
+  /** 要注册的 provider id。默认是 WorkBuddy 那条；Qoder 传自己的。 */
+  providerId: string = PROVIDER_GLOBAL,
 ): () => void {
   let released = false;
   let release: (() => void) | undefined;
@@ -296,7 +420,7 @@ function registerProvider(
     if (released) return;
 
     const adapter = createHubAdapter({
-      provider: PROVIDER_GLOBAL,
+      provider: providerId,
       shimBaseUrl,
       shimToken,
       models,
@@ -307,12 +431,12 @@ function registerProvider(
     });
 
     if (released) return;
-    release = ctx.llm.registerAdapter([PROVIDER_GLOBAL], adapter);
+    release = ctx.llm.registerAdapter([providerId], adapter);
 
     // 注册之后再自检一次：真的问 adapter 要一遍模型列表。
     // 「registerAdapter 没报错」不足以证明能用 —— P0 就是这么骗过验收的。
     try {
-      const listed = await adapter.listModels(PROVIDER_GLOBAL);
+      const listed = await adapter.listModels(providerId);
       const ids = listed.map((m: { id: string }) => m.id);
       if (ids.length === 0) {
         ctx.logger?.warn?.("dsh-model-hub: provider 注册成功但模型列表为空 —— 检查 provider.ts 的 piProvider");

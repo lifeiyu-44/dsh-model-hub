@@ -119,6 +119,24 @@ describe("client.js 能被宿主的 loader 加载", () => {
     expect(slots).toContain("sidebar.footer.action");
   });
 
+  /**
+   * 回归锚点：**每个 slot 都必须带 `inject` 回调**。
+   *
+   * 实测事故（2026-10-28）：不传 `inject` 时宿主走默认注入路径，
+   * 会调 `directoryFor()` 去要 `remote.session`，而那个服务不在我们的
+   * 声明里 —— 于是抛出
+   * `cannot get property "remote.session" without inject`，
+   * 把**模型选择器**整个打不开。
+   *
+   * 参考实现 `dsh-connect-workbuddy` 的每个 slot 都带 `inject`，
+   * 所以它只声明 `["slots","locale"]` 也正常。这一条守的就是这个。
+   */
+  it("每个 slot 都带 inject 回调（缺了会让模型选择器崩）", () => {
+    for (const entry of registered) {
+      expect(entry.options.inject, `slot ${entry.slot} 缺少 inject 回调`).toBeTypeOf("function");
+    }
+  });
+
   it("某个 slot 注册失败时，apply 仍然不抛（否则会连累宿主）", () => {
     const ctx = {
       slots: {

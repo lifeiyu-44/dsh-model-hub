@@ -35,21 +35,30 @@ export const name = "dsh-model-hub-client";
  * 但**模型选择器打不开** —— 报
  * `cannot get property "remote.session" without inject`。
  *
- * 原因：宿主渲染设置卡片时会走 `directoryFor()`，那条路径需要
- * `@deepseek-ai/dsh-api-remotes` 提供的 `remote.session`。
- * 我们的插件没声明它，注入守卫就在**我们的上下文里**抛了 ——
- * 而宿主把这个异常冒到了模型选择器的渲染路径上。
+ * 根因不在 inject 列表本身（参考插件 `dsh-connect-workbuddy` 只声明
+ * `["slots","locale"]` 也正常），而在**注册 slot 时没给 `inject` 回调**：
+ * 宿主的默认注入路径会调 `directoryFor()`，那条路要 `remote.session`。
+ * 参考实现给每个 slot 都传了 `inject: () => ({ ...props })`，
+ * 走的是显式 props 而不是默认注入路径 —— 所以它不需要声明 remote。
  *
- * 教训：除了自己直接用的 `slots`，还要声明宿主渲染路径上会经过的服务。
+ * 两处都补：inject 声明里加 `remote`（防御），注册时给 `inject` 回调（治本）。
  */
 export const inject = ["slots", "locale", "remote"];
 
 export function apply(ctx: any): void {
   try {
-    const register = (slotName: string, options: Record<string, unknown>, component: any) => {
+    /**
+     * 注册一个 slot。
+     *
+     * `inject` 回调是**必需**的，不是可选优化：它决定组件拿到哪些 props。
+     * 不给它，宿主会走默认注入路径（会调 `directoryFor()`，需要
+     * `remote.session`），于是模型选择器崩掉。给了它，注入就被短路成
+     * 我们返回的普通对象，不再触碰那条路径。
+     */
+    const register = (slotName: string, options: Record<string, unknown>, component: any, props: () => Record<string, unknown>) => {
       try {
         return ctx.slots.inject(slotName, () =>
-          ctx.slots.register({ name: slotName, ...options }, component),
+          ctx.slots.register({ name: slotName, inject: props, ...options }, component),
         );
       } catch (error) {
         console.error(`[dsh-model-hub] slot "${slotName}" 注册失败（不影响 provider）:`, error);
@@ -59,8 +68,9 @@ export function apply(ctx: any): void {
 
     // ── 1. 设置卡片：两处都注册 ──
     // 不同入口的挂载点不同，哪个能显示就显示哪个。
-    register("plugins.bundle.config", { key: "dsh-model-hub", priority: 30 }, HubCard);
-    register("plugins.row.config", { key: "dsh-model-hub#dsh-model-hub", priority: 30 }, HubCard);
+    const cardProps = () => ({});
+    register("plugins.bundle.config", { key: "dsh-model-hub", priority: 30 }, HubCard, cardProps);
+    register("plugins.row.config", { key: "dsh-model-hub#dsh-model-hub", priority: 30 }, HubCard, cardProps);
 
     // ── 2. 左下角入口（侧边栏底部，Settings 旁边）──
     // 官方契约："Optional actions beside Settings at the sidebar foot."
@@ -112,7 +122,14 @@ export function apply(ctx: any): void {
         props.wide === false ? null : h("span", null, "Model Hub"),
       );
 
-    register("sidebar.footer.action", { id: "dsh-model-hub", order: 100 }, FooterEntry);
+    // 侧边栏入口也需要 inject 回调（同一条规则：不给就走默认注入路径）。
+    // 宿主通过 props 传 `wide`（宽栏 true / 窄栏 false），这里转发即可。
+    register(
+      "sidebar.footer.action",
+      { id: "dsh-model-hub", order: 100 },
+      FooterEntry,
+      () => ({}),
+    );
   } catch (error) {
     // 最外层防线：客户端加载失败也不该影响 host 侧 provider。
     console.error("[dsh-model-hub] 客户端初始化失败（host provider 不受影响）:", error);

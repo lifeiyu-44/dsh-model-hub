@@ -214,6 +214,33 @@ export function buildProviderProfile(input: BuildProviderInput): Record<string, 
     modelErrors: new Map(),
     streamIdleTimeoutMs: 300_000,
     retryPolicy: resolveRetryPolicy(undefined, "dsh-model-hub retryPolicy"),
+
+    // ── 图片预算三件套（**缺一个就整轮报错**）──
+    //
+    // 真机事故（2026-10-29）：贴图发送后连报两次
+    // `Image request width must be a positive integer.`
+    //
+    // 根因：`PiAiAdapter.imageRequestTarget()` 是
+    //
+    //     requestImageTarget(image, {
+    //       maxPixels: profile.requestImagePixelBudget,   // ← undefined
+    //       maxBytes:  profile.requestImageMaxBytes,      // ← undefined
+    //     })
+    //
+    // 再经 `requestImageDimensions(ref.width, ref.height, undefined)`，
+    // 算出的目标宽高成了 NaN/0，宿主的附件存储校验直接拒：
+    // 「宽度必须是正整数」。
+    //
+    // 我们的 profile 是**手拼**的（不是走宿主配置解析那条路），所以宿主在
+    // `resolvePiAiProviderProfile` 里补的默认值不会自动出现在这里。三个字段
+    // 在 `ResolvedPiAiProviderProfile` 上是 required number，必须显式给。
+    //
+    // 取值抄宿主自己的默认（`lib/index.js` 的 `?? 20971520 / 4194304 / 1048576`），
+    // 不自创：多模态上游能吃的图不会比这更大，而比宿主更宽松只会让请求
+    // 在别处被拒得更晚、更难查。
+    maxRequestImageBytes: 20 * 1024 * 1024, // 单请求 base64 图片总量上限
+    requestImagePixelBudget: 4 * 1024 * 1024, // 单张请求版本的像素预算（4MP）
+    requestImageMaxBytes: 1024 * 1024, // 单张请求版本的编码字节目标（1MB）
   };
 }
 

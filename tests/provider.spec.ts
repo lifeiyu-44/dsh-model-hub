@@ -107,6 +107,36 @@ describe("createHubAdapter —— 产出的 provider 必须真的能出模型", 
     const listed = await adapterFor(withImage, { withAttachments: false }).listModels(PROVIDER);
     expect(listed[0]?.inputModalities).toEqual(["text"]);
   });
+
+  /**
+   * 真机事故回归（2026-10-29）：贴图后连报两次
+   * `Image request width must be a positive integer.`
+   *
+   * 根因不是图片本身，而是手拼的 profile 缺了三个必填的图片预算字段 ——
+   * `PiAiAdapter.imageRequestTarget()` 读 `profile.requestImagePixelBudget`
+   * 与 `requestImageMaxBytes`，undefined 会让算出的目标宽高变成 NaN/0，
+   * 宿主附件校验随即拒收。
+   *
+   * 这条测试直接调 `imageRequestTarget`（宿主就是从这里取宽高的），
+   * 断言它给出**正整数**。字段再被删掉时会立刻红。
+   */
+  it("图片请求目标宽高是正整数（缺 requestImagePixelBudget 会变成 NaN）", () => {
+    const withImage: HubModel[] = [{ ...MODELS[0]!, supportsImages: true }];
+    const adapter = adapterFor(withImage, { withAttachments: true });
+    const target = adapter.imageRequestTarget(PROVIDER, MODELS[0]!.id, {
+      attachmentId: "att_test",
+      mediaType: "image/png",
+      bytes: 1024,
+      width: 64,
+      height: 64,
+    });
+    expect(Number.isInteger(target.width)).toBe(true);
+    expect(Number.isInteger(target.height)).toBe(true);
+    expect(target.width).toBeGreaterThan(0);
+    expect(target.height).toBeGreaterThan(0);
+    // 字节目标也要是正数，否则 pi-ai 编码时同样炸
+    expect(target.maxBytes).toBeGreaterThan(0);
+  });
 });
 
 describe("思考档位表", () => {

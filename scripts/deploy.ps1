@@ -1,4 +1,4 @@
-﻿# dsh-model-hub 部署脚本
+# dsh-model-hub 部署脚本
 #
 # 这个脚本存在的唯一理由：插件在**加载期**抛错会让 host fatal 退出，
 # 进而触发 DSH 把 profile 重置为默认（bundles 清空、cordis.patch.yml 被覆盖），
@@ -108,6 +108,27 @@ function Sync-ToDesktopCopy {
   if (-not (Test-Path $dst)) {
     Write-Note "profile 里还没有这个包，跳过同步（安装时会由 pnpm 拷贝）"
     return
+  }
+
+  # 依赖解析：插件的 peerDependencies（@deepseek-ai/dsh-llm-pi-ai 等）从插件
+  # 目录向上按 Node 规则找，profile 根目录没有宿主那套包 —— 缺这层时
+  # lib/index.js 里的 dynamic import 会报 "Cannot find package"（2026-10-29
+  # 13:59 实例启动失败即此因）。把插件内 node_modules 指向仓库的安装目录，
+  # 与 hubverify 临时 profile 的 junction 形态一致，依赖一次性齐全。
+  $dstNm = Join-Path $dst 'node_modules'
+  $repoNm = Join-Path $ProjectDir 'node_modules'
+  if (Test-Path $dstNm) {
+    $item = Get-Item $dstNm -Force
+    if ($item.LinkType -ne 'Junction') { Remove-Item $dstNm -Recurse -Force }
+  }
+  if (-not (Test-Path $dstNm)) {
+    cmd /c mklink /J "$dstNm" "$repoNm" | Out-Null
+    if (-not (Test-Path (Join-Path $dstNm '@deepseek-ai'))) {
+      throw "插件依赖 junction 创建失败：$dstNm -> $repoNm"
+    }
+    Write-Ok "依赖 junction 已建立（-> 仓库 node_modules）"
+  } else {
+    Write-Ok '依赖 junction 已存在'
   }
   $src = Join-Path $ProjectDir 'lib'
   $dstLib = Join-Path $dst 'lib'

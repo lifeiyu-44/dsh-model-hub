@@ -75,41 +75,42 @@ Set-Content -Path $vbsPath -Value $vbs -Encoding ASCII
 Remove-Item $logPath -ErrorAction SilentlyContinue
 
 # //B = 批量模式，不弹任何对话框（这正是 explorer 触发时那个安全警告的来源）
-Start-Process -FilePath 'wscript.exe' -ArgumentList ('//B', '"' + $vbsPath + '"') -WindowStyle Hidden
-Write-Host "已触发重启（wscript //B）"
+# **不要加 //B**：实测（2026-10-29）带上它 wscript 直接不执行脚本，
+# 日志一个字都不写、进程也没换。不加则正常跑完。
+#
+# 用 wscript 而不是 explorer：explorer 走文件关联，Windows 会弹
+# 「打开文件 - 安全警告（发行商: 未知发布者）」，等于每次都要人工点一下。
+Start-Process -FilePath 'wscript.exe' -ArgumentList ('"' + $vbsPath + '"') -WindowStyle Hidden
+Write-Host "已触发重启（wscript）"
 
 if ($NoWait) { exit 0 }
 
-# ── 4. 等 relaunch.log 出现 done / FAILED ──
+# ── 4. 等主进程真的换掉 ──
+#
+# **不能只等 relaunch.log 的 done**：relauncher 由 wscript 拉起，它自己也在
+# 某条进程树里，本机会在「stopping main process」之后把它连带收掉
+# （实测 2026-10-29：日志停在那一行，但应用其实已经重启好了）。
+# 所以判据用「出现了一个 pid 不同的新主进程」—— 那才是用户真正关心的结果。
 $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
-$done = $false
-$failed = $false
+$newMain = $null
 while ((Get-Date) -lt $deadline) {
   Start-Sleep -Milliseconds 500
-  if (-not (Test-Path $logPath)) { continue }
-  $text = Get-Content $logPath -Raw -ErrorAction SilentlyContinue
-  if ($null -eq $text) { continue }
-  if ($text -match 'FAILED') { $failed = $true; break }
-  if ($text -match '(?m)^\d{4}-\d{2}-\d{2} .* done$') { $done = $true; break }
+  $after = Get-CimInstance Win32_Process -Filter "Name='DeepSeek Harness.exe'" -ErrorAction SilentlyContinue |
+    Where-Object { $_.CommandLine -notmatch '--type=' } | Select-Object -First 1
+  if ($after -and [int]$after.ProcessId -ne $mainPid) { $newMain = $after; break }
 }
 
 Write-Host '--- relaunch.log ---'
-if (Test-Path $logPath) { Get-Content $logPath | Select-Object -Last 10 }
+if (Test-Path $logPath) { Get-Content $logPath | Select-Object -Last 10 } else { '（日志未生成）' }
 
-if ($failed) { Fail "重启失败（见上面的日志）" }
-if (-not $done) { Fail "等 $TimeoutSeconds 秒没有看到 done（可能还在启动，或日志没写）" }
+if (-not $newMain) { Fail "等 $TimeoutSeconds 秒没有出现新的主进程（旧 $mainPid 可能还在）" }
 
-# ── 5. 确认新进程真的在跑 ──
-$after = Get-CimInstance Win32_Process -Filter "Name='DeepSeek Harness.exe'" -ErrorAction SilentlyContinue |
-  Where-Object { $_.CommandLine -notmatch '--type=' } | Select-Object -First 1
-if (-not $after) { Fail "日志说 done，但没有新的主进程 —— 请手动启动 DSH" }
-if ([int]$after.ProcessId -eq $mainPid) { Fail "主进程还是原来那个（$mainPid），没有真正重启" }
+Write-Host "OK    已重启：新主进程 $($newMain.ProcessId)" -ForegroundColor Green
 
-Write-Host "OK    已重启：新主进程 $($after.ProcessId)" -ForegroundColor Green
-
-# ── 6. 报出新的 GUI 端口（宿主每次重启会换端口）──
+# ── 5. 报出新的 GUI 端口（宿主每次重启会换端口）──
+Start-Sleep -Milliseconds 800
 $listen = Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue |
-  Where-Object { $_.OwningProcess -eq [int]$after.ProcessId } |
+  Where-Object { $_.OwningProcess -eq [int]$newMain.ProcessId } |
   Select-Object -ExpandProperty LocalPort -Unique | Sort-Object
 if ($listen) { Write-Host "     监听端口：$($listen -join ', ')" }
 exit 0

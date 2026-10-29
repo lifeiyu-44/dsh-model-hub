@@ -287,6 +287,34 @@ function applyInner(ctx: any, config: any): void {
           }
         }
       }
+      // **把已登记账号的凭据引用收敛到自有 token 文件**：老账号可能还指向
+      // dsh-connect-workbuddy 的 vault（那是别的插件的目录，卸载/换号就失效），
+      // 而我们自己的 token 目录里已有同一 uid 的明文副本。指向自有目录之后，
+      // 运行时按 credential_ref 现读就不再依赖外部插件。
+      try {
+        const tokenByUid = new Map<string, string>();
+        for (const entry of tokenEntries) {
+          if (entry.identity.uid !== undefined) tokenByUid.set(entry.identity.uid, entry.source);
+        }
+        // 直接查库而不是用 queryAccounts：后者有意不返回 credential_ref
+        // （凭据引用不外泄给面板），而这里正需要它。
+        const rows = db
+          .prepare("SELECT id, display_name, credential_ref FROM accounts WHERE channel_id = ? AND deleted = 0")
+          .all(PROVIDER_GLOBAL) as { id: string; display_name: string; credential_ref: string | null }[];
+        for (const account of rows) {
+          if (account.credential_ref === null || account.credential_ref === "") continue;
+          const uid = identityOfTokenFile(account.credential_ref)?.uid;
+          if (uid === undefined) continue;
+          const preferred = tokenByUid.get(uid);
+          if (preferred === undefined || preferred === account.credential_ref) continue;
+          db.prepare("UPDATE accounts SET credential_ref = ? WHERE id = ?").run(preferred, account.id);
+          ctx.logger?.info?.(
+            `dsh-model-hub: 账号 ${account.display_name} 的凭据引用改指自有 token 文件`,
+          );
+        }
+      } catch (error) {
+        ctx.logger?.warn?.("dsh-model-hub: 凭据引用收敛失败（不影响已有凭据的读取）", error);
+      }
       // runtime（shim + 拉目录 + 上架 adapter）由 state 统一建：目录/凭据问题
       // 在 hub-state 里折成 error 日志并保持「无 runtime」，不会炸这里。
       // 池空（用户删光/停光所有账号）是用户自己的选择，不算部署事故：

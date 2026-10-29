@@ -17,3 +17,7 @@ _e2e.*
 
 # SDD å·¥ä½œåŒºï¼ˆè´¦æœ¬/ç®€æŠ¥/å®¡æŸ¥åŒ…ï¼‰
 .superpowers/
+
+# Chrome headless ½ØÍ¼ÓÃµÄÁÙÊ± profile / Éó¼ÆÖĞ¼ä²úÎï£¨2026-10-29£©
+docs/prototype/_chrome-prof/
+docs/prototype/_audit*

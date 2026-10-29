@@ -2,7 +2,7 @@ import { statSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { resolveDshHome } from "@deepseek-ai/dsh-home-paths";
-import { Config } from "./config.js";
+import { Config, readSetting } from "./config.js";
 import { HUB_DB_NAME, HUB_DIR_NAME, PROVIDER_PREFIX } from "./constants.js";
 import { openHubDatabase } from "./store/db.js";
 import { seedChannelsAndAccounts } from "./store/seed.js";
@@ -73,8 +73,10 @@ export function apply(ctx: any, config: any): void {
  * 读写路由在 `routes/`，探测在 `probe/prober.ts`。
  */
 function applyInner(ctx: any, config: any): void {
-  const settings = config ?? {};
-  if (settings.enabled === false) return;
+  // config 本身也可能是根引用（volatileEntries 支持 root ref），一并解引用；
+  // 解出来再 ?? {} 兜底「没传 config」的情况。
+  const settings = readSetting(config) ?? {};
+  if (readSetting(settings.enabled) === false) return;
 
   const dbPath = join(resolveDshHome(), HUB_DIR_NAME, HUB_DB_NAME);
 
@@ -97,7 +99,7 @@ function applyInner(ctx: any, config: any): void {
     let workbuddyShimUrl: string | undefined; // 诊断栏「shim 地址」键的现状来源
     const state = createHubState({
       db,
-      settings: () => settings,
+      settings: () => ({ recordEnabled: readSetting(settings.recordEnabled) !== false, retentionDays: readSetting(settings.retentionDays) }),
       logger: ctx.logger,
       runtimeFactory: async (input: ChannelRuntimeInput): Promise<RuntimeHandle> => {
         const handle = await startChannelRuntime({
@@ -244,18 +246,18 @@ function applyInner(ctx: any, config: any): void {
 
     // ── 4. 保留清理：启动跑一次 + 每 24h（每次现读最新设置）──
     try {
-      const removed = pruneRequests(db, settings.retentionDays ?? 90);
+      const removed = pruneRequests(db, readSetting(settings.retentionDays) ?? 90);
       if (removed > 0) {
-        ctx.logger?.info?.(`dsh-model-hub: 启动清理删除 ${removed} 条过期明细（保留 ${settings.retentionDays ?? 90} 天）`);
+        ctx.logger?.info?.(`dsh-model-hub: 启动清理删除 ${removed} 条过期明细（保留 ${readSetting(settings.retentionDays) ?? 90} 天）`);
       }
     } catch (error) {
       ctx.logger?.warn?.("dsh-model-hub: 启动保留清理失败（不影响插件）", error);
     }
     const retentionTimer = setInterval(() => {
       try {
-        const removed = pruneRequests(db, settings.retentionDays ?? 90);
+        const removed = pruneRequests(db, readSetting(settings.retentionDays) ?? 90);
         if (removed > 0) {
-          ctx.logger?.info?.(`dsh-model-hub: 定时清理删除 ${removed} 条过期明细（保留 ${settings.retentionDays ?? 90} 天）`);
+          ctx.logger?.info?.(`dsh-model-hub: 定时清理删除 ${removed} 条过期明细（保留 ${readSetting(settings.retentionDays) ?? 90} 天）`);
         }
       } catch (error) {
         // 定时器回调里的异常是 uncaughtException，会炸宿主 —— 必须就地吞掉
@@ -290,7 +292,7 @@ function applyInner(ctx: any, config: any): void {
       // /channels 新增 models_by_channel（任务 10 的渠道展开要用）
       modelsByChannel: () => state.panelModelsByChannel(),
       // /diag 新增 recordEnabled/retentionDays，与写路由的保留天数同源
-      settings: () => ({ recordEnabled: settings.recordEnabled, retentionDays: settings.retentionDays }),
+      settings: () => ({ recordEnabled: readSetting(settings.recordEnabled), retentionDays: readSetting(settings.retentionDays) }),
       // 诊断栏里只有 host 知道的事实。全部来自本次启动的实测值，
       // 不是写死的字符串 —— 面板上写假值比不写更糟。
       diag: () => ({
@@ -314,7 +316,7 @@ function applyInner(ctx: any, config: any): void {
       state,
       db,
       proberDeps: {}, // 生产：fetch / exchangePat / dshHome 全用缺省实现
-      retentionDays: () => settings.retentionDays ?? 90,
+      retentionDays: () => readSetting(settings.retentionDays) ?? 90,
     });
 
     ctx.logger?.info?.(

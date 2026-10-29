@@ -26,8 +26,8 @@ import { writeWorkbuddyTokenFile } from "../src/channels/workbuddy/token-store.j
  */
 
 const CHANNEL = "hub-workbuddy-global";
-const UID_NEW = "6718316d-17c0-412c-b90f-4016e8c3f7ca";
-const UID_OLD = "05261715-369f-4e40-a9a7-26ebe2b5aa31";
+const UID_NEW = "00000000-0000-4000-8000-000000000001";
+const UID_OLD = "00000000-0000-4000-8000-000000000002";
 
 function newHome(): string {
   return mkdtempSync(join(tmpdir(), "dmh-identity-"));
@@ -51,29 +51,29 @@ function seedToken(home: string, uid: string, nickname: string): string {
 describe("账号身份：uid 是唯一身份", () => {
   it("identityOfTokenFile 读出明文 uid / nickname / 区域", () => {
     const home = newHome();
-    const path = seedToken(home, UID_NEW, "fuqinghe4@gmail.com");
+    const path = seedToken(home, UID_NEW, "user-a@example.com");
     const identity = identityOfTokenFile(path);
     expect(identity?.uid).toBe(UID_NEW);
-    expect(identity?.nickname).toBe("fuqinghe4@gmail.com");
+    expect(identity?.nickname).toBe("user-a@example.com");
     expect(identity?.region).toBe("global");
   });
 
   it("listTokenStoreEntries 列出目录里全部账号（换号后可并存多个）", () => {
     const home = newHome();
-    seedToken(home, UID_NEW, "fuqinghe4@gmail.com");
-    seedToken(home, UID_OLD, "fuqinghe950917@gmail.com");
+    seedToken(home, UID_NEW, "user-a@example.com");
+    seedToken(home, UID_OLD, "user-b@example.com");
     const entries = listTokenStoreEntries(home);
     expect(entries).toHaveLength(2);
     expect(entries.map((e) => e.identity.nickname).sort()).toEqual([
-      "fuqinghe4@gmail.com",
-      "fuqinghe950917@gmail.com",
+      "user-a@example.com",
+      "user-b@example.com",
     ]);
   });
 
   it("同 uid 但旧 id 是 `:default` → 复用 `:default`，不新建", async () => {
     const home = newHome();
     const db = await freshDb(home);
-    const path = seedToken(home, UID_NEW, "fuqinghe4@gmail.com");
+    const path = seedToken(home, UID_NEW, "user-a@example.com");
     // 模拟旧版本：硬编码 `:default` 指向这个文件
     seedChannelsAndAccounts(db, [{ id: CHANNEL, kind: "workbuddy", displayName: "WorkBuddy Global" }], [
       { id: `${CHANNEL}:default`, channelId: CHANNEL, displayName: "旧名", credentialRef: path, isCurrent: true },
@@ -85,14 +85,14 @@ describe("账号身份：uid 是唯一身份", () => {
   it("uid 相同但凭据文件不同（历史 vault 副本）→ 仍认作同一账号", async () => {
     const home = newHome();
     const db = await freshDb(home);
-    const tokenPath = seedToken(home, UID_NEW, "fuqinghe4@gmail.com");
+    const tokenPath = seedToken(home, UID_NEW, "user-a@example.com");
     // 另一份文件，写着同一个 uid（模拟 vault 与 token-store 各一份）
     const vaultDir = join(home, "workbuddy-vault", "global");
     mkdirSync(vaultDir, { recursive: true });
-    const vaultPath = join(vaultDir, "3c5280f93a71195d53a1e56a.json");
+    const vaultPath = join(vaultDir, "test-account-a.json");
     writeFileSync(vaultPath, JSON.stringify({ auth: { accessToken: "x", domain: "www.workbuddy.ai" }, account: { uid: UID_NEW } }), "utf8");
     seedChannelsAndAccounts(db, [{ id: CHANNEL, kind: "workbuddy", displayName: "WorkBuddy Global" }], [
-      { id: `${CHANNEL}:default`, channelId: CHANNEL, displayName: "fuqinghe4@gmail.com", credentialRef: vaultPath, isCurrent: true },
+      { id: `${CHANNEL}:default`, channelId: CHANNEL, displayName: "user-a@example.com", credentialRef: vaultPath, isCurrent: true },
     ]);
     expect(resolveAccountId(db, CHANNEL, UID_NEW, tokenPath)).toBe(`${CHANNEL}:default`);
     db.close();
@@ -115,9 +115,9 @@ describe("账号身份：uid 是唯一身份", () => {
   it("全新 uid → 派生稳定 id（同一 uid 永远同一 id）", async () => {
     const home = newHome();
     const db = await freshDb(home);
-    const path = seedToken(home, UID_NEW, "fuqinghe4@gmail.com");
+    const path = seedToken(home, UID_NEW, "user-a@example.com");
     expect(resolveAccountId(db, CHANNEL, UID_NEW, path)).toBeUndefined(); // 库里还没有
-    expect(`${CHANNEL}:${accountIdSuffixOf(UID_NEW)}`).toBe(`${CHANNEL}:wb-0030c17ec732`);
+    expect(`${CHANNEL}:${accountIdSuffixOf(UID_NEW)}`).toBe(`${CHANNEL}:wb-11e594f48195`);
     // 稳定：两次算出来一样
     expect(accountIdSuffixOf(UID_NEW)).toBe(accountIdSuffixOf(UID_NEW));
     db.close();
@@ -128,11 +128,11 @@ describe("重复行收敛（真机事故：同一账号两行）", () => {
   it("同一凭据文件的两行 → 收敛成一行，保留 current 那行", async () => {
     const home = newHome();
     const db = await freshDb(home);
-    const path = seedToken(home, UID_NEW, "fuqinghe4@gmail.com");
+    const path = seedToken(home, UID_NEW, "user-a@example.com");
     seedChannelsAndAccounts(db, [{ id: CHANNEL, kind: "workbuddy", displayName: "WorkBuddy Global" }], [
       // 事故现场：`:default` 与 `wb-0030…` 指向同一个文件
-      { id: `${CHANNEL}:default`, channelId: CHANNEL, displayName: "fuqinghe4@gmail.com", credentialRef: path, isCurrent: false },
-      { id: `${CHANNEL}:${accountIdSuffixOf(UID_NEW)}`, channelId: CHANNEL, displayName: "fuqinghe4@gmail.com", credentialRef: path, isCurrent: true },
+      { id: `${CHANNEL}:default`, channelId: CHANNEL, displayName: "user-a@example.com", credentialRef: path, isCurrent: false },
+      { id: `${CHANNEL}:${accountIdSuffixOf(UID_NEW)}`, channelId: CHANNEL, displayName: "user-a@example.com", credentialRef: path, isCurrent: true },
     ]);
 
     const report = dedupeAccountsByCredential(db, CHANNEL);
@@ -147,7 +147,7 @@ describe("重复行收敛（真机事故：同一账号两行）", () => {
   it("两行都没 current → 保留 last_ok_at 更新的那行", async () => {
     const home = newHome();
     const db = await freshDb(home);
-    const path = seedToken(home, UID_NEW, "fuqinghe4@gmail.com");
+    const path = seedToken(home, UID_NEW, "user-a@example.com");
     seedChannelsAndAccounts(db, [{ id: CHANNEL, kind: "workbuddy", displayName: "WorkBuddy Global" }], [
       { id: `${CHANNEL}:default`, channelId: CHANNEL, displayName: "旧", credentialRef: path, isCurrent: false },
       { id: `${CHANNEL}:${accountIdSuffixOf(UID_NEW)}`, channelId: CHANNEL, displayName: "新", credentialRef: path, isCurrent: false },
@@ -162,7 +162,7 @@ describe("重复行收敛（真机事故：同一账号两行）", () => {
   it("被并掉的行的请求记录与聚合改挂到保留行（消耗不凭空消失）", async () => {
     const home = newHome();
     const db = await freshDb(home);
-    const path = seedToken(home, UID_NEW, "fuqinghe4@gmail.com");
+    const path = seedToken(home, UID_NEW, "user-a@example.com");
     const keepId = `${CHANNEL}:${accountIdSuffixOf(UID_NEW)}`;
     seedChannelsAndAccounts(db, [{ id: CHANNEL, kind: "workbuddy", displayName: "WorkBuddy Global" }], [
       { id: `${CHANNEL}:default`, channelId: CHANNEL, displayName: "旧", credentialRef: path, isCurrent: false },
@@ -196,11 +196,11 @@ describe("重复行收敛（真机事故：同一账号两行）", () => {
   it("不同 uid 的两行不合并（两个真实账号都要在）", async () => {
     const home = newHome();
     const db = await freshDb(home);
-    const newPath = seedToken(home, UID_NEW, "fuqinghe4@gmail.com");
-    const oldPath = seedToken(home, UID_OLD, "fuqinghe950917@gmail.com");
+    const newPath = seedToken(home, UID_NEW, "user-a@example.com");
+    const oldPath = seedToken(home, UID_OLD, "user-b@example.com");
     seedChannelsAndAccounts(db, [{ id: CHANNEL, kind: "workbuddy", displayName: "WorkBuddy Global" }], [
-      { id: `${CHANNEL}:${accountIdSuffixOf(UID_NEW)}`, channelId: CHANNEL, displayName: "fuqinghe4@gmail.com", credentialRef: newPath, isCurrent: true },
-      { id: `${CHANNEL}:${accountIdSuffixOf(UID_OLD)}`, channelId: CHANNEL, displayName: "fuqinghe950917@gmail.com", credentialRef: oldPath, isCurrent: false },
+      { id: `${CHANNEL}:${accountIdSuffixOf(UID_NEW)}`, channelId: CHANNEL, displayName: "user-a@example.com", credentialRef: newPath, isCurrent: true },
+      { id: `${CHANNEL}:${accountIdSuffixOf(UID_OLD)}`, channelId: CHANNEL, displayName: "user-b@example.com", credentialRef: oldPath, isCurrent: false },
     ]);
     const report = dedupeAccountsByCredential(db, CHANNEL);
     expect(report.removed).toEqual([]);
@@ -212,7 +212,7 @@ describe("重复行收敛（真机事故：同一账号两行）", () => {
   it("幂等：收敛后再跑一次什么都不做", async () => {
     const home = newHome();
     const db = await freshDb(home);
-    const path = seedToken(home, UID_NEW, "fuqinghe4@gmail.com");
+    const path = seedToken(home, UID_NEW, "user-a@example.com");
     seedChannelsAndAccounts(db, [{ id: CHANNEL, kind: "workbuddy", displayName: "WorkBuddy Global" }], [
       { id: `${CHANNEL}:default`, channelId: CHANNEL, displayName: "旧", credentialRef: path, isCurrent: false },
       { id: `${CHANNEL}:${accountIdSuffixOf(UID_NEW)}`, channelId: CHANNEL, displayName: "新", credentialRef: path, isCurrent: true },

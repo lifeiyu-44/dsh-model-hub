@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { readFileSync, existsSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { startShim } from "../src/shim/server.js";
+import { readWorkbuddyVault } from "../src/channels/workbuddy/vault.js";
 
 /**
  * **真实上游**测试（需要本机有 WorkBuddy 凭据）。
@@ -14,19 +14,17 @@ import { startShim } from "../src/shim/server.js";
  * 所以这里故意发**不带 system** 的请求，验证 shim 的 `ensureSystemHead` 兜住了。
  *
  * 没有凭据时整组跳过，不让 CI 红。
+ *
+ * 凭据从插件自己的 vault 读取（`$DSH_HOME/workbuddy-vault/<region>/*.json`），
+ * 不硬编码任何账号路径 —— 别人 clone 下来跑也不会因为路径不存在而误判。
  */
 
-const VAULT = "C:\\Users\\20260617\\.dsh\\workbuddy-vault\\global\\3c5280f93a71195d53a1e56a.json";
+const vault = readWorkbuddyVault();
 
 function readToken(): string | undefined {
-  if (!existsSync(VAULT)) return undefined;
-  try {
-    const doc = JSON.parse(readFileSync(VAULT, "utf8"));
-    const token = doc?.auth?.accessToken;
-    return typeof token === "string" && token.length > 0 ? token : undefined;
-  } catch {
-    return undefined;
-  }
+  const parsed = vault?.parsed;
+  if (parsed === undefined || parsed.kind !== "plain") return undefined;
+  return typeof parsed.token === "string" && parsed.token.length > 0 ? parsed.token : undefined;
 }
 
 const token = readToken();

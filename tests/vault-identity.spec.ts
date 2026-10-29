@@ -12,9 +12,9 @@ import { listVaultEntries, vaultIdentityOf } from "../src/channels/workbuddy/vau
 
 describe("vaultIdentityOf", () => {
   it("明文 nickname + uid → 都提取", () => {
-    expect(vaultIdentityOf({ account: { uid: "12345678-aaaa", nickname: "fuqinghe@x.com" } })).toEqual({
+    expect(vaultIdentityOf({ account: { uid: "12345678-aaaa", nickname: "nick@example.com" } })).toEqual({
       uid: "12345678-aaaa",
-      nickname: "fuqinghe@x.com",
+      nickname: "nick@example.com",
     });
   });
 

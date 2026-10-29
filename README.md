@@ -17,6 +17,35 @@
 
 ## 安装
 
+### 从 GitHub 装（普通用户）
+
+构建产物（`lib/`、`client.js`）已随仓库提交，装完即可用，不需要本地构建：
+
+```powershell
+# CLI 方式
+dsh plugin --profile desktop add github:lifeiyu-44/dsh-model-hub
+```
+
+也可以在 GUI 里：侧边栏 **插件** → 添加插件 → 粘贴 `github:lifeiyu-44/dsh-model-hub`。
+
+装完重启 DSH，到 **设置 → 插件 → DSH Model Hub** 配置账号。
+
+> 前置条件：Node.js `^22.19.0 || >=24`，以及 DSH 本体（插件通过 `peerDependencies` 使用宿主的 `@deepseek-ai/dsh-*` 包，不会重复安装）。
+
+### 从源码开发（贡献者）
+
+```powershell
+git clone https://github.com/lifeiyu-44/dsh-model-hub
+cd dsh-model-hub
+pnpm install
+pnpm build     # tsdown：产出 lib/ 与 client.js
+pnpm test
+```
+
+然后按下面「本地部署」把它挂进 profile。
+
+### 本地部署（改完源码后生效）
+
 ```powershell
 # 1) 构建 + 同步进 desktop profile + 临时 profile 真机启动验证
 powershell -ExecutionPolicy Bypass -File scripts\deploy.ps1

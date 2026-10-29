@@ -1,11 +1,10 @@
 node_modules/
-lib/
 *.log
 .DS_Store
 
 # 构建产物：client.js 由 tsdown 生成（lib/.client/client-impl.cjs + 外壳），
-# 与 lib/ 同理不进仓库。
-client.js
+# 但为了让 dsh plugin add github:... 装完即可用（package.json 的 main 指向
+# lib/index.js），lib/ 与 client.js **必须进仓库**——这里刻意不排除它们。
 
 # 部署脚本每次运行都会在 backup/ 下留一份 profile 快照（含本机路径与
 # 别人的插件配置），那是本机运行产物，不进仓库。
@@ -18,6 +17,6 @@ _e2e.*
 # SDD 工作区（账本/简报/审查包）
 .superpowers/
 
-# Chrome headless ��ͼ�õ���ʱ profile / ����м���2026-10-29��
+# Chrome headless 截图用的临时 profile / 审计中间产物（2026-10-29）
 docs/prototype/_chrome-prof/
 docs/prototype/_audit*

@@ -1,0 +1,13 @@
+# 仓库内统一用 LF，避免 Windows 提交把换行转成 CRLF 后在 Linux/macOS 上跑出差异
+* text=auto eol=lf
+
+# 二进制/生成物不做换行转换
+*.png binary
+*.jpg binary
+*.ico binary
+*.woff binary
+*.woff2 binary
+
+# PowerShell 脚本保持 CRLF —— PowerShell 5.1 对 LF 的 here-string 解析有坑
+*.ps1 text eol=crlf
+*.vbs text eol=crlf

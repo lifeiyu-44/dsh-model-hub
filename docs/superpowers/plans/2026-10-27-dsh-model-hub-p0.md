@@ -1381,11 +1381,11 @@ git add -A && git commit -m "feat: 插件入口 + 记录路由 + WorkBuddy 渠�
 $env:ELECTRON_RUN_AS_NODE='1'
 & 'D:\ds\DeepSeek Harness.exe' 'D:\ds\resources\runtime\primary-runtime\dependencies\pnpm\bin\pnpm.mjs' add -w "file:D:\work_dir\dsh-model-hub"
 ```
-工作目录：`C:\Users\20260617\.dsh\profiles\desktop`
+工作目录：`%USERPROFILE%\.dsh\profiles\desktop`
 
 - [ ] **步骤 2：确认 bundles 里有它**
 
-读 `C:\Users\20260617\.dsh\profiles\desktop\package.json`，确认 `dsh.profile.bundles` 含 `dsh-model-hub`。若没有，手工加进去。
+读 `%USERPROFILE%\.dsh\profiles\desktop\package.json`，确认 `dsh.profile.bundles` 含 `dsh-model-hub`。若没有，手工加进去。
 
 - [ ] **步骤 3：dump config 验证**
 
@@ -1407,7 +1407,7 @@ $env:ELECTRON_RUN_AS_NODE='1'; $env:DSH_DESKTOP_DEFAULT_PROFILE='desktop'
 3. 查库：
 ```powershell
 $env:ELECTRON_RUN_AS_NODE='1'
-node -e "const {DatabaseSync}=require('node:sqlite');const db=new DatabaseSync('C:/Users/20260617/.dsh/model-hub/hub.db');console.log(db.prepare('SELECT request_id,model,input_tokens,output_tokens,first_token_ms,duration_ms,decode_tps,status_code FROM requests ORDER BY created_at DESC LIMIT 3').all())"
+node -e "const {DatabaseSync}=require('node:sqlite');const db=new DatabaseSync(process.env.USERPROFILE+'/.dsh/model-hub/hub.db');console.log(db.prepare('SELECT request_id,model,input_tokens,output_tokens,first_token_ms,duration_ms,decode_tps,status_code FROM requests ORDER BY created_at DESC LIMIT 3').all())"
 ```
 预期：至少一行，`first_token_ms` / `decode_tps` 非空，`status_code=200`
 

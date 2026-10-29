@@ -563,12 +563,12 @@ describe("addQoderPat", () => {
     const { state } = fakeState(database);
 
     const result = await addQoderPat(
-      { exchangePat: async (pat, source) => ({ jobToken: "jt", userID: "uid-1", name: "付庆贺", email: "f@x.com", expiresAt: Date.now() + 60_000, source }) },
+      { exchangePat: async (pat, source) => ({ jobToken: "jt", userID: "uid-1", name: "张三", email: "f@x.com", expiresAt: Date.now() + 60_000, source }) },
       database, state, "pt-named0000001",
     );
 
     const rows = queryAccounts(database) as { id: string; display_name: string }[];
-    expect(rows.find((r) => r.id === result.accountId)?.display_name).toBe("付庆贺");
+    expect(rows.find((r) => r.id === result.accountId)?.display_name).toBe("张三");
   });
 });
 
@@ -577,7 +577,7 @@ describe("账号显示名 = 真实身份", () => {
     newHome();
     const database = await freshDb();
     const { state } = fakeState(database);
-    seedVault("withnick", "pt-wb-token-1", { uid: "12345678-aaaa-bbbb", nickname: "fuqinghe@x.com" });
+    seedVault("withnick", "pt-wb-token-1", { uid: "12345678-aaaa-bbbb", nickname: "nick@example.com" });
     seedVault("withuid", "pt-wb-token-2", { uid: "87654321-cccc-dddd" });
     seedVault("noident", "pt-wb-token-3");
 
@@ -588,7 +588,7 @@ describe("账号显示名 = 真实身份", () => {
     const rows = queryAccounts(database) as { id: string; display_name: string }[];
     const names = Object.fromEntries(rows.map((r) => [r.id, r.display_name]));
     // 无既有账号时按 uid 哈希派生稳定 id —— 显示名才是本用例的重点
-    expect(Object.values(names).sort()).toEqual(["WB · 87654321", "fuqinghe@x.com", "noident"]);
+    expect(Object.values(names).sort()).toEqual(["WB · 87654321", "nick@example.com", "noident"]);
   });
 
   it("WB 导入：同 uid 的账号已存在（id 派生规则不同）→ 刷新该行而不是插重复行", async () => {
@@ -597,10 +597,10 @@ describe("账号显示名 = 真实身份", () => {
     const { state } = fakeState(database);
     // 启动 seed 的形态：id 是 `:default`、credential_ref 指向 vault 文件
     // （json 里的 account.uid 与待导入条目相同 —— 同一个真实账号）
-    const vaultPath = seedVault("3c5280f93a71195d53a1e56a", "pt-wb-token-x", { uid: "05261715-369f" });
+    const vaultPath = seedVault("test-account-a", "pt-wb-token-x", { uid: "00000000-0000-4000-8000-000000000002" });
     seedChannelsAndAccounts(database,
       [{ id: GLOBAL_CHANNEL, kind: "workbuddy", displayName: "WorkBuddy Global" }],
-      [{ id: `${GLOBAL_CHANNEL}:default`, channelId: GLOBAL_CHANNEL, displayName: "fuqinghe950917@gmail.com", credentialRef: vaultPath, isCurrent: true }]);
+      [{ id: `${GLOBAL_CHANNEL}:default`, channelId: GLOBAL_CHANNEL, displayName: "user-b@example.com", credentialRef: vaultPath, isCurrent: true }]);
 
     const report = await oneClickAuth({}, database, state);
 

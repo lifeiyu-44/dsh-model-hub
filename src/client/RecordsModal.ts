@@ -1,5 +1,5 @@
 import React from "react";
-import { fetchRecords, fetchSummary } from "./api.js";
+import { fetchChannels, fetchRecords, fetchSummary } from "./api.js";
 import { formatCount, formatMs, formatTps, toCsv } from "./format.js";
 import { RECORD_COLUMNS, RecordsTable } from "./RecordsTable.js";
 import { ensureStyles } from "./styles.js";
@@ -38,6 +38,8 @@ export function RecordsModal(props: { onClose: () => void }): React.ReactElement
   const [range, setRange] = React.useState<RangeKey>("");
   const [error, setError] = React.useState<string | undefined>(undefined);
   const [loading, setLoading] = React.useState(true);
+  /** 账号 id → 显示名（记录表的「账号」列）。取不到时按 id 尾段显示。 */
+  const [accountNames, setAccountNames] = React.useState<Record<string, string>>({});
 
   // Esc 关闭。绑在 document 上，因为焦点可能在弹层内任意位置。
   React.useEffect(() => {
@@ -52,7 +54,7 @@ export function RecordsModal(props: { onClose: () => void }): React.ReactElement
     setLoading(true);
     setError(undefined);
     try {
-      const [nextSummary, records] = await Promise.all([
+      const [nextSummary, records, channelData] = await Promise.all([
         fetchSummary(),
         fetchRecords({
           limit: 2000,
@@ -60,10 +62,15 @@ export function RecordsModal(props: { onClose: () => void }): React.ReactElement
           model,
           ...(range === "" ? {} : { hours: Number(range) }),
         }),
+        // 账号显示名映射：记录表「账号」列用它（取不到不影响明细展示）
+        fetchChannels().catch(() => undefined),
       ]);
       setSummary(nextSummary);
       setRows(records.requests);
       setModels(records.models);
+      if (channelData !== undefined) {
+        setAccountNames(Object.fromEntries(channelData.accounts.map((a) => [a.id, a.display_name])));
+      }
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));
     } finally {
@@ -194,7 +201,7 @@ export function RecordsModal(props: { onClose: () => void }): React.ReactElement
           { className: "dmh-table-wrap" },
           error !== undefined
             ? h("div", { className: "dmh-errbox" }, `读取失败：${error}`)
-            : h(RecordsTable, { rows }),
+            : h(RecordsTable, { rows, accounts: accountNames }),
         ),
 
         // ── 口径说明（原型原文，别改：用户就是靠这段理解数字怎么来的） ──

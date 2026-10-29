@@ -87,6 +87,11 @@ export interface ChannelsResponse {
    * 旧 host 不带这个键时按 `{}` 消费（展开行显示「目录不可用」）。
    */
   models_by_channel: Record<string, CatalogEntry[]>;
+  /**
+   * 账号 → 今日消耗（daily_rollups 的 account_id 维度现算）。
+   * 账号行 meta 与记录表的「账号」列都用它；旧 host 不带时按 `{}` 消费。
+   */
+  usage_by_account?: Record<string, { requests: number; tokens: number }>;
 }
 
 /** 数据路由前缀，与 `src/routes/data.ts` 的 `DATA_PREFIX` 必须一致。 */

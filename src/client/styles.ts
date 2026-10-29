@@ -205,6 +205,14 @@ body[data-ds-dark-theme] .dmh-scope, .dmh-scope[data-dmh-dark]{
 .dmh-authline-name{font-weight:600;color:var(--dmh-label-primary)}
 .dmh-authline-detail{font-size:11px;color:var(--dmh-label-tertiary);word-break:break-all}
 .dmh-authline-actions{display:flex;justify-content:flex-end;padding:6px 16px 8px}
+
+/* ===== 「?」使用说明弹层 ===== */
+.dmh-help-body{padding:4px 16px 14px;overflow:auto;max-height:calc(80vh - 64px)}
+.dmh-help-section{padding:8px 0 4px;border-top:1px solid var(--dmh-border-l1)}
+.dmh-help-section:first-child{border-top:0}
+.dmh-help-title{font-size:12px;font-weight:600;color:var(--dmh-label-primary);margin-bottom:4px}
+.dmh-help-list{margin:0;padding-left:18px;display:flex;flex-direction:column;gap:4px}
+.dmh-help-list li{font-size:11px;line-height:1.55;color:var(--dmh-label-secondary)}
 `;
 
 /**

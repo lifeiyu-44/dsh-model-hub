@@ -1,6 +1,7 @@
 import type { DatabaseSync } from "node:sqlite";
 import {
   queryAccounts,
+  queryAccountUsage,
   queryChannels,
   queryDiagFacts,
   queryModels,
@@ -131,6 +132,13 @@ export function registerDataRoutes(
                 accounts: queryAccounts(deps.db),
                 // 纯增量键（裁定 2）：现有 channels/accounts 键原样不动
                 models_by_channel: deps.modelsByChannel?.() ?? {},
+                // 按账号的今日消耗（面板要在账号行上直接看到「谁用了多少」）
+                usage_by_account: Object.fromEntries(
+                  queryAccountUsage(deps.db).map((row) => [
+                    row.account_id,
+                    { requests: row.today_requests, tokens: row.today_tokens },
+                  ]),
+                ),
               });
             },
           }),

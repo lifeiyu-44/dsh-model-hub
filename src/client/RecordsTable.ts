@@ -15,6 +15,7 @@ import type { RequestRow } from "./types.js";
 export const RECORD_COLUMNS = [
   { key: "created_at", label: "时间" },
   { key: "channel_id", label: "渠道" },
+  { key: "account_id", label: "账号" },
   { key: "model", label: "模型" },
   { key: "input_tokens", label: "in" },
   { key: "output_tokens", label: "out" },
@@ -42,8 +43,13 @@ function shortChannel(id: string): string {
   return tail;
 }
 
-export function RecordsTable(props: { rows: RequestRow[] }): React.ReactElement {
+export function RecordsTable(props: {
+  rows: RequestRow[];
+  /** 账号 id → 显示名（/channels 的 accounts）。缺省时回退 id 尾段。 */
+  accounts?: Record<string, string>;
+}): React.ReactElement {
   const { rows } = props;
+  const accounts = props.accounts ?? {};
   const h = React.createElement;
 
   if (rows.length === 0) {
@@ -73,6 +79,14 @@ export function RecordsTable(props: { rows: RequestRow[] }): React.ReactElement 
           { key: row.request_id },
           h("td", { className: "dmh-mono" }, formatClock(row.created_at)),
           h("td", null, shortChannel(row.channel_id)),
+          // 账号列：显示名优先（多账号时一眼看出「谁用的」）；历史行无归属显示 —
+          h(
+            "td",
+            { className: "dmh-mono" },
+            row.account_id === null || row.account_id === ""
+              ? "—"
+              : accounts[row.account_id] ?? row.account_id.replace(/^hub-[a-z-]+:/, ""),
+          ),
           // estimated 的记录要标出来 —— 那是字符数估算，不是上游真实计数
           h("td", null, row.estimated === 1 ? `${row.model} *` : row.model),
           h("td", { className: "dmh-num" }, formatCount(row.input_tokens)),

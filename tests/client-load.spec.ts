@@ -386,6 +386,10 @@ describe("解禁后的 HubCard 交互（真 React 渲染）", () => {
           { id: "qf-model", name: "QF Model", creditMultiplier: 1 },
         ],
       },
+      // 按账号的今日消耗（账号行 meta 用它）
+      usage_by_account: {
+        [ACCOUNT_ID]: { requests: 3, tokens: 1234 },
+      },
     },
     [`${PREFIX}/records?limit=4`]: { requests: [], models: [] },
     [`${PREFIX}/catalog`]: { models: [] },
@@ -485,6 +489,29 @@ describe("解禁后的 HubCard 交互（真 React 渲染）", () => {
     const source = readFileSync(CLIENT, "utf8");
     expect(source).toContain("auth/one-click");
     expect(source).toContain("records/clear");
+  });
+
+  it("账号行显示按账号的今日消耗（usage_by_account）", () => {
+    // 假数据里 usage_by_account 给 default 账号 3 次 / 1234 tokens；formatCount 缩写为 1.2k
+    expect(container.textContent).toContain("今日 3 次");
+    expect(container.textContent).toContain("1.2k tokens");
+  });
+
+  it("「?」按钮打开使用说明弹层（含多账号与凭据来源说明），Esc/× 关闭", async () => {
+    const help = buttonByLabel("?");
+    expect(help, "卡片头应有「?」说明按钮").toBeDefined();
+    await act(async () => {
+      help!.click();
+    });
+    expect(container.textContent).toContain("Model Hub 使用说明");
+    expect(container.textContent).toContain("多账号怎么加");
+    expect(container.textContent).toContain("凭据从哪来");
+    const close = buttons().find((b) => b.getAttribute("aria-label") === "关闭");
+    expect(close, "说明弹层应有 × 关闭按钮").toBeDefined();
+    await act(async () => {
+      close!.click();
+    });
+    expect(container.textContent).not.toContain("Model Hub 使用说明");
   });
 
   /**

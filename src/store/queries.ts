@@ -94,6 +94,26 @@ export function queryChannels(db: DatabaseSync, date = localDate(Date.now())) {
     .all(date);
 }
 
+/**
+ * 按账号的今日消耗。
+ *
+ * `daily_rollups` 的主键本就带 account_id 维度，所以这是现成的口径 ——
+ * 面板要在账号行上直接看到「这个账号今天用了多少」，而不是只有渠道/模型级
+ * 汇总。空 account_id（历史行/未归属）原样返回，UI 显示 `—`。
+ */
+export function queryAccountUsage(db: DatabaseSync, date = localDate(Date.now())) {
+  return db
+    .prepare(
+      `SELECT account_id,
+              SUM(req_count) AS today_requests,
+              SUM(tokens) AS today_tokens
+       FROM daily_rollups
+       WHERE date = ?
+       GROUP BY account_id`,
+    )
+    .all(date) as { account_id: string; today_requests: number; today_tokens: number }[];
+}
+
 /** 账号列表。凭据本身**不返回** —— 面板只需要知道有没有、能不能用。 */
 export function queryAccounts(db: DatabaseSync) {
   return db

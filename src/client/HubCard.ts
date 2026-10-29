@@ -11,6 +11,7 @@ import {
 } from "./api.js";
 import { formatClock, formatCount, formatMs, formatTps } from "./format.js";
 import { RecordsModal } from "./RecordsModal.js";
+import { HelpModal } from "./HelpModal.js";
 import { ensureStyles } from "./styles.js";
 import type { AccountRow, CatalogEntry, ChannelRow, RequestRow, Summary } from "./types.js";
 import { AddAccountModal } from "./AddAccountModal.js";
@@ -93,6 +94,10 @@ export function HubCard(): React.ReactElement {
   const [addModalFor, setAddModalFor] = React.useState<string | undefined>(undefined);
   const [testResults, setTestResults] = React.useState<Map<string, TestResult>>(new Map());
   const [modelsByChannel, setModelsByChannel] = React.useState<Record<string, CatalogEntry[]>>({});
+  /** 账号 → 今日消耗（daily_rollups 的 account_id 维度）；旧 host 不带键时为空对象。 */
+  const [usageByAccount, setUsageByAccount] = React.useState<Record<string, { requests: number; tokens: number }>>({});
+  /** 「?」说明弹层。 */
+  const [helpOpen, setHelpOpen] = React.useState(false);
 
   const load = React.useCallback(async () => {
     try {
@@ -113,6 +118,8 @@ export function HubCard(): React.ReactElement {
       setCatalog(catalogData.models);
       // 旧 host 不带 models_by_channel 键：当 `{}` 消费，展开行显示「目录为空」而不是崩
       setModelsByChannel(channelData.models_by_channel ?? {});
+      // 旧 host 不带 usage_by_account 键：当 `{}` 消费，账号行显示「今日 0 次」
+      setUsageByAccount(channelData.usage_by_account ?? {});
       setDiag(diagData);
       // testResults 不随 load() 清空（终审 M5 收口后的语义）：「✓/✗」是用户
       // 手动点的测试结论，一次普通的数据刷新推不出它过期 —— 常驻到下次点
@@ -205,6 +212,12 @@ export function HubCard(): React.ReactElement {
                       ? "国内版"
                       : "国际版",
                   account.has_credential === 1 ? "有凭据" : "缺凭据",
+                  // 这个账号今天用了多少（daily_rollups 的 account_id 维度）
+                  usageByAccount[account.id] === undefined
+                    ? "今日 0 次"
+                    : `今日 ${formatCount(usageByAccount[account.id]!.requests)} 次 · ${formatCount(
+                        usageByAccount[account.id]!.tokens,
+                      )} tokens`,
                   cooling ? `熔断中（至 ${formatClock(account.cooldown_until!)}）` : undefined,
                   account.last_error === null ? undefined : `上次失败：${account.last_error.slice(0, 24)}`,
                   account.last_ok_at === null
@@ -538,6 +551,16 @@ export function HubCard(): React.ReactElement {
               "button",
               {
                 className: "dmh-btn",
+                title: "使用说明",
+                "aria-label": "使用说明",
+                onClick: () => setHelpOpen(true),
+              },
+              "?",
+            ),
+            h(
+              "button",
+              {
+                className: "dmh-btn",
                 disabled: someBusy,
                 onClick: () => {
                   setLoading(true);
@@ -588,6 +611,7 @@ export function HubCard(): React.ReactElement {
       ),
     ),
     modalOpen ? h(RecordsModal, { onClose: () => setModalOpen(false) }) : null,
+    helpOpen ? h(HelpModal, { onClose: () => setHelpOpen(false) }) : null,
     addModalFor !== undefined
       ? h(AddAccountModal, {
           channelId: addModalFor,

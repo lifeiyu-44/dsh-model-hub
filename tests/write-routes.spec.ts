@@ -239,11 +239,12 @@ function postThrough(
 // ── writeGate：门禁矩阵 ──
 
 describe("writeGate", () => {
-  it("门禁：Origin 非回环 403；Origin 缺失 403；非 JSON 415；Host 非回环 403", () => {
+  it("门禁：Origin 非回环 403（带原文）；非 JSON 415；Host 非回环 403；Origin 缺失放行（本地非浏览器客户端）", () => {
     expect(writeGate({ headers: { host: "127.0.0.1:1", origin: "http://evil.com", "content-type": "application/json" } }))
-      .toEqual({ ok: false, status: 403, json: { error: "origin_not_allowed" } });
+      .toEqual({ ok: false, status: 403, json: { error: "origin_not_allowed", origin: "http://evil.com" } });
+    // Origin 缺失 = 本地非浏览器客户端（浏览器 POST 必带 Origin）→ 放行（GUI 桌面壳真实形态）
     expect(writeGate({ headers: { host: "127.0.0.1:1", "content-type": "application/json" } }))
-      .toEqual({ ok: false, status: 403, json: { error: "origin_not_allowed" } });
+      .toEqual({ ok: true });
     expect(writeGate({ headers: { host: "127.0.0.1:1", origin: "http://127.0.0.1:1", "content-type": "text/html" } }))
       .toEqual({ ok: false, status: 415, json: { error: "unsupported_media_type" } });
     expect(writeGate({ headers: { host: "192.168.1.5:3000", origin: "http://127.0.0.1:1", "content-type": "application/json" } }))
@@ -263,9 +264,15 @@ describe("writeGate", () => {
     expect(writeGate({ headers: clean, method: "get" })).toEqual({ ok: false, status: 405, json: { error: "method_not_allowed" } });
     expect(writeGate({ headers: { host: "localhost", origin: "http://localhost:1" } }))
       .toEqual({ ok: false, status: 415, json: { error: "unsupported_media_type" } });
-    // Origin 形如 "null"（部分浏览器场景）或任意垃圾串：解析不了就不是回环
+    // Origin "null"（网页沙箱 iframe）：仍是网页威胁面 → 拒（body 带回原文可诊）
     expect(writeGate({ headers: { host: "127.0.0.1:1", origin: "null", "content-type": "application/json" } }))
-      .toEqual({ ok: false, status: 403, json: { error: "origin_not_allowed" } });
+      .toEqual({ ok: false, status: 403, json: { error: "origin_not_allowed", origin: "null" } });
+    // 桌面壳自定义协议 origin（非 http(s) scheme）：只能是我们自己的 GUI → 放行
+    expect(writeGate({ headers: { host: "127.0.0.1:1", origin: "app://dsh", "content-type": "application/json" }, method: "POST" }))
+      .toEqual({ ok: true });
+    // 垃圾串：解析不了 → 拒（保守，body 带回原文）
+    expect(writeGate({ headers: { host: "127.0.0.1:1", origin: "not-a-url", "content-type": "application/json" } }))
+      .toEqual({ ok: false, status: 403, json: { error: "origin_not_allowed", origin: "not-a-url" } });
   });
 });
 

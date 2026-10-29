@@ -85,7 +85,8 @@ function originIsLoopback(origin: string): boolean {
 }
 
 /**
- * 写门禁：Host 回环 + Origin 存在且回环 + content-type 含 application/json
+ * 写门禁：Host 回环 → Origin 规则（缺失放行；http(s) 必须回环；非 http(s)
+ * 自定义协议放行；"null"/垃圾串拒）→ content-type 含 application/json
  * （+ method 提供时必须是 POST）。返回 `{ok:false}` 时 status/json 由调用方
  * 原样回给客户端；错误 json 统一 `{error}` 形状（与 data.ts 的只读门禁一致）。
  */
@@ -95,9 +96,34 @@ export function writeGate(req: { headers?: any; method?: string }): WriteVerdict
     return { ok: false, status: 403, json: { error: "host_not_allowed" } };
   }
   const origin = headers["origin"];
-  // curl 与跨源页面都不带 Origin 或带非回环 Origin：写操作比只读更严，必须存在且回环
-  if (typeof origin !== "string" || !originIsLoopback(origin)) {
-    return { ok: false, status: 403, json: { error: "origin_not_allowed" } };
+  // 网页是唯一的 CSRF 威胁面：
+  //   · Origin 缺失 = 本地非浏览器客户端（浏览器 POST 必带 Origin）——宿主回环
+  //     已必查，与规格 §10「插件与 Agent 同权限」的本机信任模型一致 → 放行
+  //   · Origin 为 http(s) → 必须回环（恶意网页来源直接拒）
+  //   · Origin 为非 http(s) 的自定义协议（桌面壳的 app:// 之类）→ 只能是我们
+  //     自己的 GUI → 放行
+  //   · "null"（网页沙箱 iframe）与解析不了的垃圾串 → 拒，403 body 带回原文可诊
+  //   （真机 2026-10-29：桌面壳的一键认证被旧规则误拦 origin_not_allowed，即此因）
+  if (origin !== undefined && origin !== "") {
+    if (typeof origin !== "string") {
+      return { ok: false, status: 403, json: { error: "origin_not_allowed" } };
+    }
+    if (origin === "null") {
+      return { ok: false, status: 403, json: { error: "origin_not_allowed", origin } };
+    }
+    let parsed: URL | undefined;
+    try {
+      parsed = new URL(origin);
+    } catch {
+      parsed = undefined;
+    }
+    if (parsed !== undefined && (parsed.protocol === "http:" || parsed.protocol === "https:")) {
+      if (!hostIsLoopback(parsed.host)) {
+        return { ok: false, status: 403, json: { error: "origin_not_allowed", origin } };
+      }
+    } else if (parsed === undefined) {
+      return { ok: false, status: 403, json: { error: "origin_not_allowed", origin } };
+    }
   }
   const contentType = headers["content-type"];
   if (typeof contentType !== "string" || !contentType.toLowerCase().includes("application/json")) {
@@ -347,6 +373,13 @@ async function handleWrite(req: any, res: any, deps: WriteDeps, logger: any): Pr
   try {
     const verdict = writeGate(req);
     if (!verdict.ok) {
+      // Origin 拒绝带服务端日志：GUI 的 Origin 形态若再出漏网变体，日志里
+      // 一眼可诊（真机 2026-10-29 一键认证被旧规则误拦即此教训）。
+      if (verdict.status === 403 && (verdict.json as { error?: string })?.error === "origin_not_allowed") {
+        logger?.warn?.(
+          `dsh-model-hub: 写请求被 Origin 门禁拒绝（origin=${(verdict.json as { origin?: string }).origin ?? "(缺失)"}）`,
+        );
+      }
       json(res, verdict.status, verdict.json);
       return;
     }

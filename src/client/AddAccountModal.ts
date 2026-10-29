@@ -115,7 +115,7 @@ export function AddAccountModal(props: {
               props.kind === "qoder" ? "粘贴 Qoder CN 的 Personal Access Token" : "从 WorkBuddy vault 只读导入已有凭据",
             ),
           ),
-          h("button", { className: "dmh-btn", onClick: dismiss, "aria-label": "关闭" }, "×"),
+          h("button", { className: "dmh-btn dmh-icon", onClick: dismiss, "aria-label": "关闭" }, "×"),
         ),
         props.kind === "workbuddy"
           ? h(

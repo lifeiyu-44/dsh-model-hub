@@ -1,16 +1,27 @@
 import { readFileSync, statSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { resolveDshHome } from "@deepseek-ai/dsh-home-paths";
 import { Config, readSetting } from "./config.js";
 import { HUB_DB_NAME, HUB_DIR_NAME, PROVIDER_PREFIX } from "./constants.js";
 import { openHubDatabase } from "./store/db.js";
-import { seedChannelsAndAccounts } from "./store/seed.js";
+import { seedChannelsAndAccounts, type AccountSeed } from "./store/seed.js";
+import { makeCurrent } from "./store/mutations.js";
+import { queryAccounts } from "./store/queries.js";
 import { pruneRequests } from "./store/retention.js";
+import { dedupeAccountsByCredential } from "./store/dedupe.js";
 import { detectCredential, parseAuthDocument } from "./channels/workbuddy/auth.js";
 import { readWorkbuddyVault, vaultIdentityOf } from "./channels/workbuddy/vault.js";
 import { realDecryptAuthFile } from "./channels/workbuddy/at-rest.js";
 import { writeWorkbuddyTokenFile } from "./channels/workbuddy/token-store.js";
+import {
+  accountIdSuffixOf,
+  identityOfTokenFile,
+  listTokenStoreEntries,
+  resolveAccountId,
+  type TokenIdentity,
+} from "./channels/workbuddy/identity.js";
 import { createSessionManager } from "./channels/qoder/credentials.js";
 import { createHubState } from "./state/hub-state.js";
 import {
@@ -90,6 +101,22 @@ function applyInner(ctx: any, config: any): void {
     } catch (error) {
       ctx.logger?.error?.("dsh-model-hub: 数据库打开失败，记录功能关闭（provider 不受影响）", error);
       return;
+    }
+
+    // ── 1b. 账号表自愈：历史遗留的重复行收敛成一行（幂等）──
+    //
+    // 旧版本有两套 id 规则（硬编码 `:default` 与 uid 哈希），同一账号被登记过
+    // 两次。规则已统一，但旧库里已写入的重复行不会自己消失 —— 这里收敛一次，
+    // 并把被并掉那行的请求/聚合改挂到保留行上（否则「按账号消耗」会凭空少）。
+    try {
+      const report = dedupeAccountsByCredential(db, PROVIDER_GLOBAL);
+      if (report.removed.length > 0) {
+        ctx.logger?.info?.(
+          `dsh-model-hub: 合并重复账号 ${report.removed.length} 行（保留 ${report.kept.join("、")}）`,
+        );
+      }
+    } catch (error) {
+      ctx.logger?.warn?.("dsh-model-hub: 重复账号收敛失败（面板可能仍显示重复行）", error);
     }
 
     // ── 2. HubState 状态中心 ──
@@ -182,37 +209,83 @@ function applyInner(ctx: any, config: any): void {
       ctx.logger?.info?.(`dsh-model-hub: 凭据来源 = ${credential.source}（${credential.parsed.region ?? "global"}）`);
     }
 
-    if (credential !== undefined) {
-      // 显示名用真实身份：vault json 的 account.nickname（明文才有）→ uid 前缀 →
-      // 通用默认名。换号/多账号时面板一眼可辨，不再是一排「WorkBuddy 主账号」。
-      // 读不到就退回默认名，不影响凭据本身。
-      let wbDisplayName = "WorkBuddy 主账号";
-      try {
-        const identity = vaultIdentityOf(JSON.parse(readFileSync(credential.source, "utf8")) as Record<string, unknown>);
-        wbDisplayName =
-          identity.nickname ?? (identity.uid !== undefined ? `WB · ${identity.uid.slice(0, 8)}` : wbDisplayName);
-      } catch {
-        /* 身份读不到就退回默认名 */
+    // ── 3a-2. 账号登记：**按 uid 全量登记，不再只登记"当前登录的那一个"** ──
+    //
+    // 真机事故（2026-10-29）：面板上同一个账号出现两行、显示名与凭据文件都相同。
+    // 根因是这里原先硬编码 `<channel>:default` 登记"当前凭据"，而一键认证按
+    // uid 哈希登记同一账号 —— 两套 id 规则互不知情。且 `:default` 的身份随
+    // 桌面端换号静默漂移（昨天指向老账号、今天指向新账号），老账号那一行被
+    // 顶成"挂着老名字的新账号"。
+    //
+    // 现在的规则只有一条（见 channels/workbuddy/identity.ts）：**uid 是身份**，
+    // 启动时把 token 目录里**所有**账号都登记一遍，每个都先按 uid 找已有行
+    // 复用其 id。这样：换号登录 → 一键认证写新文件 → 重启 → 两个账号都在，
+    // 且各自的名字/凭据/消耗互不串。
+    const dshHome = resolveDshHome();
+    const tokenEntries = listTokenStoreEntries(dshHome);
+    const wbSeeds: AccountSeed[] = [];
+    // 桌面端当前登录的账号（credential）若还没落到 token 目录（例如只读到 vault
+    // 里的历史条目），仍要登记它 —— 否则首次安装时面板会是空的。
+    const seedCandidates: { source: string; identity: TokenIdentity }[] = tokenEntries.map((entry) => ({
+      source: entry.source,
+      identity: entry.identity,
+    }));
+    if (credential !== undefined && !seedCandidates.some((c) => c.source === credential.source)) {
+      const identity = identityOfTokenFile(credential.source) ?? { region: credential.parsed.region ?? "global" };
+      seedCandidates.push({ source: credential.source, identity });
+    }
+    // 同一 uid 只登记一次（同一账号可能既有 vault 条目又有 token 文件）
+    const seenUids = new Set<string>();
+    for (const candidate of seedCandidates) {
+      const uid = candidate.identity.uid;
+      if (uid !== undefined) {
+        if (seenUids.has(uid)) continue;
+        seenUids.add(uid);
       }
-      // 先把渠道与账号登记上 —— 面板的「渠道」「账号」两栏靠这两张表，
-      // 而它们不随请求写入。少了这一步，没发过请求时面板看起来像坏了。
-      // 写失败不影响 provider（诊断信息而已），所以只记日志。
+      // 按 uid 复用已有行的 id（含 `:default`、历史文件名 id、旧哈希 id）；
+      // 没有 uid 时才退回「用文件路径派生」的稳定 id —— 绝不硬编码 `:default`。
+      const existingId = resolveAccountId(db, PROVIDER_GLOBAL, uid, candidate.source);
+      const id =
+        existingId ??
+        (uid !== undefined
+          ? `${PROVIDER_GLOBAL}:${accountIdSuffixOf(uid)}`
+          : `${PROVIDER_GLOBAL}:${createHash("sha256").update(candidate.source, "utf8").digest("hex").slice(0, 12)}`);
+      wbSeeds.push({
+        id,
+        channelId: PROVIDER_GLOBAL,
+        // 显示名用真实身份：nickname（邮箱/昵称）→ uid 前缀 → 通用默认名
+        displayName:
+          candidate.identity.nickname ??
+          (uid !== undefined ? `WB · ${uid.slice(0, 8)}` : "WorkBuddy 账号"),
+        credentialRef: candidate.source, // 凭据只存引用，绝不落明文
+        // 已有 current 账号时不动它（seed 的 DO UPDATE 也不动 is_current）
+        isCurrent: false,
+      });
+    }
+    if (wbSeeds.length > 0) {
       try {
         seedChannelsAndAccounts(
           db,
           [{ id: PROVIDER_GLOBAL, kind: "workbuddy", displayName: "WorkBuddy Global" }],
-          [
-            {
-              id: `${PROVIDER_GLOBAL}:default`,
-              channelId: PROVIDER_GLOBAL,
-              displayName: wbDisplayName,
-              credentialRef: credential.source, // 凭据只存引用，绝不落明文
-              isCurrent: true,
-            },
-          ],
+          wbSeeds,
         );
+        ctx.logger?.info?.(`dsh-model-hub: 登记 ${wbSeeds.length} 个 WorkBuddy 账号（按 uid 去重）`);
       } catch (error) {
         ctx.logger?.warn?.("dsh-model-hub: 渠道/账号登记失败（面板可能显示为空，provider 不受影响）", error);
+      }
+    }
+    if (credential !== undefined) {
+      // 渠道里一个 current 都没有（首次安装/被删光）时，把当前凭据那个账号顶上
+      if (!queryAccounts(db).some((a) => a.channel_id === PROVIDER_GLOBAL && a.is_current === 1)) {
+        const uid = identityOfTokenFile(credential.source)?.uid;
+        const fallbackId = resolveAccountId(db, PROVIDER_GLOBAL, uid, credential.source);
+        if (fallbackId !== undefined) {
+          try {
+            makeCurrent(db, PROVIDER_GLOBAL, fallbackId);
+          } catch (error) {
+            ctx.logger?.warn?.("dsh-model-hub: 设置当前账号失败（不影响 provider）", error);
+          }
+        }
       }
       // runtime（shim + 拉目录 + 上架 adapter）由 state 统一建：目录/凭据问题
       // 在 hub-state 里折成 error 日志并保持「无 runtime」，不会炸这里。

@@ -6,6 +6,7 @@ import { HUB_DIR_NAME, PROVIDER_PREFIX } from "../constants.js";
 import { authCandidates, parseAuthDocument, type AuthKind } from "../channels/workbuddy/auth.js";
 import { listVaultEntries } from "../channels/workbuddy/vault.js";
 import { writeWorkbuddyTokenFile } from "../channels/workbuddy/token-store.js";
+import { accountIdSuffixOf, resolveAccountId } from "../channels/workbuddy/identity.js";
 import { fetchCatalog } from "../channels/workbuddy/catalog.js";
 import {
   exchangePat as exchangePatLive, listPatFiles, resolveDshHome,
@@ -119,25 +120,13 @@ function statusFromError(message: string): number | undefined {
 
 /**
  * 按 uid 在已有账号的凭据文件里找账号 id。
- * vault json 与自写 token 文件都带 `account.uid`（明文），因此不需要额外列。
+ *
+ * 转发到 `channels/workbuddy/identity.ts` 的单一裁决点 —— 启动装配层与一键
+ * 认证必须用**同一个**判定，否则又会造出「同一账号两行」（2026-10-29 真机
+ * 事故）。这里保留薄封装只是为了让调用点读起来顺。
  */
-function findAccountIdByUid(db: DatabaseSync, uid: string): string | undefined {
-  const rows = db
-    .prepare("SELECT id, credential_ref FROM accounts WHERE channel_id = ? AND deleted = 0")
-    .all(PROVIDER_GLOBAL) as { id: string; credential_ref: string | null }[];
-  for (const row of rows) {
-    if (row.credential_ref === null || row.credential_ref === "") continue;
-    try {
-      const doc = JSON.parse(readFileSync(row.credential_ref, "utf8").replace(/^\uFEFF/, "")) as Record<string, unknown>;
-      const account = (typeof doc["account"] === "object" && doc["account"] !== null
-        ? (doc["account"] as Record<string, unknown>)
-        : undefined);
-      if (account?.["uid"] === uid) return row.id;
-    } catch {
-      /* 读不了/坏文件：跳过，不影响其它账号的匹配 */
-    }
-  }
-  return undefined;
+function findAccountIdByUid(db: DatabaseSync, uid: string, source?: string): string | undefined {
+  return resolveAccountId(db, PROVIDER_GLOBAL, uid, source);
 }
 
 /**
@@ -396,7 +385,10 @@ export async function oneClickAuth(deps: ProberDeps, db: DatabaseSync, state: Hu
       // `:default`、历史文件名 id、uid 哈希 id），都是同一个真实账号 —— 按 uid
       // 找已有行刷新，绝不因 id 规则不同而插重复行（真机 2026-10-29：同一
       // 账号在面板出现两行，即此因）。
-      const existingId = entry.identity.uid !== undefined ? findAccountIdByUid(db, entry.identity.uid) : undefined;
+      const existingId =
+        entry.identity.uid !== undefined
+          ? findAccountIdByUid(db, entry.identity.uid, entry.source)
+          : resolveAccountId(db, PROVIDER_GLOBAL, undefined, entry.source);
       const id = existingId ?? `${PROVIDER_GLOBAL}:${entry.accountId}`;
       if (taken.has(id)) continue; // 幂等：已存在（含软删）跳过，不计入 accountsAdded
       fresh.push({
@@ -426,13 +418,11 @@ export async function oneClickAuth(deps: ProberDeps, db: DatabaseSync, state: Hu
         ...(dec.expiresAtMs === undefined ? {} : { expiresAtMs: dec.expiresAtMs }),
       });
       // 同 uid 已有账号（vault 或历史 token 文件）→ 复用它的 id，只刷新
-      // 显示名/凭据引用；否则用 uid 哈希派生稳定 id。
+      // 显示名/凭据引用；否则用 uid 哈希派生稳定 id（与启动登记同一规则）。
+      const derivedId = `${PROVIDER_GLOBAL}:${accountIdSuffixOf(uid)}`;
       const existingId =
-        findAccountIdByUid(db, uid) ??
-        (taken.has(`${PROVIDER_GLOBAL}:wb-${createHash("sha256").update(uid, "utf8").digest("hex").slice(0, 12)}`)
-          ? `${PROVIDER_GLOBAL}:wb-${createHash("sha256").update(uid, "utf8").digest("hex").slice(0, 12)}`
-          : undefined);
-      const id = existingId ?? `${PROVIDER_GLOBAL}:wb-${createHash("sha256").update(uid, "utf8").digest("hex").slice(0, 12)}`;
+        findAccountIdByUid(db, uid, tokenPath) ?? (taken.has(derivedId) ? derivedId : undefined);
+      const id = existingId ?? derivedId;
       const isNew = existingId === undefined;
       if (isNew && taken.has(id)) continue; // 软删账号：不复活
       fresh.push({

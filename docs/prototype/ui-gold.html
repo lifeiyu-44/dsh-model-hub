@@ -1,0 +1,366 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>Model Hub · 黑金版预览</title>
+<style>
+  :root{
+    /* ── 黑金令牌 ── */
+    --g-050:#FBF3DC; --g-100:#F3E3B3; --g-200:#E9D08A; --g-300:#E3C46A;
+    --g-400:#D4AF37; --g-500:#C9A227; --g-600:#A8841C; --g-700:#7A5F14;
+
+    --ink-000:#0A0A0B; --ink-050:#0E0E10; --ink-100:#131315; --ink-150:#17171A;
+    --ink-200:#1C1C20; --ink-300:#232328; --ink-400:#2C2C33;
+
+    --txt-1:#EDE9E1; --txt-2:#B6B0A5; --txt-3:#8A857C; --txt-4:#5E5A53;
+
+    --line-1:rgba(255,255,255,.055);
+    --line-2:rgba(255,255,255,.09);
+    --gold-line:rgba(212,175,55,.20);
+    --gold-line-strong:rgba(212,175,55,.38);
+    --gold-wash:rgba(212,175,55,.08);
+    --gold-wash-2:rgba(212,175,55,.14);
+
+    --ok:#5CB47E; --err:#E06A5A; --warn:#D9A441;
+
+    --sans:"Segoe UI Variable Text","Segoe UI","Noto Sans SC","Microsoft YaHei UI",system-ui,sans-serif;
+    --mono:"Cascadia Mono",Consolas,ui-monospace,monospace;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{
+    background:radial-gradient(1200px 600px at 50% -10%,#191513 0%,var(--ink-000) 60%);
+    min-height:100vh;padding:28px 24px 48px;color:var(--txt-1);font:13px/1.6 var(--sans);
+    -webkit-font-smoothing:antialiased;
+  }
+  .stage{max-width:960px;margin:0 auto;display:flex;flex-direction:column;gap:22px}
+  .stage-label{font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--g-500);margin-bottom:-8px}
+
+  /* ══════════ 卡片 ══════════ */
+  .card{
+    background:linear-gradient(180deg,#151517 0%,#101012 100%);
+    border:1px solid var(--gold-line);border-radius:14px;overflow:hidden;
+    box-shadow:0 1px 0 rgba(251,243,220,.045) inset,0 24px 48px -32px #000,0 0 0 1px rgba(0,0,0,.6);
+  }
+  .card-head{
+    padding:15px 18px;display:flex;align-items:center;justify-content:space-between;gap:14px;
+    border-bottom:1px solid var(--gold-line);
+    background:linear-gradient(180deg,rgba(212,175,55,.055),transparent);
+  }
+  .card-title{
+    font-size:14px;font-weight:600;letter-spacing:.01em;
+    background:linear-gradient(180deg,var(--g-100),var(--g-400));
+    -webkit-background-clip:text;background-clip:text;color:transparent;
+  }
+  .card-desc{font-size:11.5px;color:var(--txt-3);margin-top:3px}
+  .head-actions{display:flex;gap:7px}
+
+  /* 按钮 */
+  .btn{
+    font:inherit;font-size:11.5px;padding:5px 11px;border-radius:7px;cursor:pointer;
+    border:1px solid var(--line-2);background:rgba(255,255,255,.02);color:var(--txt-2);
+    white-space:nowrap;transition:all .14s;
+  }
+  .btn:hover{border-color:var(--gold-line-strong);color:var(--g-100);background:var(--gold-wash)}
+  .btn.primary{
+    background:linear-gradient(180deg,var(--g-300),var(--g-500));
+    border-color:var(--g-600);color:#1A1508;font-weight:600;
+    box-shadow:0 1px 0 rgba(255,255,255,.25) inset,0 4px 12px -6px rgba(212,175,55,.7);
+  }
+  .btn.primary:hover{filter:brightness(1.08)}
+  .btn.danger{color:#F0938A;border-color:rgba(224,106,90,.34)}
+  .btn.danger:hover{background:rgba(224,106,90,.1);border-color:rgba(224,106,90,.55);color:#FFA79E}
+  .btn.sm{padding:3px 8px;font-size:11px}
+  .btn.icon{width:26px;padding:0;height:26px;display:grid;place-items:center;border-radius:50%;font-size:12px}
+
+  /* tabs */
+  .tabs{display:flex;gap:2px;padding:0 14px;border-bottom:1px solid var(--line-1);background:rgba(255,255,255,.012)}
+  .tabs button{
+    font:inherit;font-size:12px;padding:10px 13px;border:0;background:none;cursor:pointer;
+    color:var(--txt-3);border-bottom:2px solid transparent;margin-bottom:-1px;transition:color .14s;
+  }
+  .tabs button:hover{color:var(--txt-2)}
+  .tabs button.on{
+    color:var(--g-200);border-bottom-color:var(--g-400);font-weight:600;
+    text-shadow:0 0 14px rgba(212,175,55,.35);
+  }
+
+  /* 行 */
+  .row{display:flex;align-items:center;gap:12px;padding:12px 18px;border-bottom:1px solid var(--line-1)}
+  .row:last-child{border-bottom:0}
+  .row:hover{background:rgba(212,175,55,.035)}
+  .row.group{background:rgba(212,175,55,.05);padding:8px 18px;border-bottom:1px solid var(--gold-line)}
+  .row-main{flex:1;min-width:0}
+  .row-name{font-size:12.5px;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+  .row-meta{font-size:11px;color:var(--txt-3);margin-top:3px;font-variant-numeric:tabular-nums}
+  .group-label{font-size:11px;letter-spacing:.06em;color:var(--g-300);font-weight:600}
+
+  .dot{width:6px;height:6px;border-radius:50%;flex:none}
+  .dot.ok{background:var(--ok);box-shadow:0 0 8px rgba(92,180,126,.6)}
+  .dot.err{background:var(--err);box-shadow:0 0 8px rgba(224,106,90,.6)}
+  .dot.warn{background:var(--warn)}
+  .dot.off{background:var(--txt-4)}
+
+  /* 徽标 */
+  .badge{
+    font-size:10.5px;padding:1.5px 7px;border-radius:5px;font-weight:500;
+    background:rgba(255,255,255,.05);color:var(--txt-2);border:1px solid var(--line-1);
+  }
+  .badge.cur{background:var(--gold-wash-2);color:var(--g-200);border-color:var(--gold-line-strong)}
+  .badge.ok{background:rgba(92,180,126,.12);color:#8FD3A8;border-color:rgba(92,180,126,.28)}
+  .badge.err{background:rgba(224,106,90,.12);color:#F0938A;border-color:rgba(224,106,90,.3)}
+
+  /* 开关 */
+  .switch{
+    width:32px;height:18px;border-radius:9px;background:rgba(255,255,255,.1);
+    position:relative;flex:none;cursor:pointer;border:1px solid var(--line-1);padding:0;transition:all .16s;
+  }
+  .switch::after{
+    content:"";position:absolute;top:2px;left:2px;width:12px;height:12px;border-radius:50%;
+    background:#CFC9BF;transition:transform .16s,background .16s;
+  }
+  .switch.on{
+    background:linear-gradient(180deg,var(--g-400),var(--g-600));border-color:var(--g-600);
+    box-shadow:0 0 12px -2px rgba(212,175,55,.55);
+  }
+  .switch.on::after{transform:translateX(14px);background:#1A1508}
+
+  /* 表格 */
+  .table{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums}
+  .table th{
+    text-align:left;font-size:10.5px;font-weight:500;color:var(--txt-3);letter-spacing:.04em;
+    padding:9px 12px;border-bottom:1px solid var(--gold-line);white-space:nowrap;background:rgba(212,175,55,.03);
+  }
+  .table td{padding:8px 12px;font-size:11.5px;border-bottom:1px solid var(--line-1);white-space:nowrap;color:var(--txt-2)}
+  .table tbody tr:hover{background:rgba(212,175,55,.035)}
+  .num{text-align:right}
+  .mono{font-family:var(--mono);font-size:11px;color:var(--txt-3)}
+  .tps{color:var(--g-300);font-weight:600}
+  .note{font-size:11px;color:var(--txt-3);padding:11px 18px;line-height:1.7}
+  .strong{color:var(--txt-1);font-weight:600}
+
+  /* ══════════ 使用说明弹层 ══════════ */
+  .overlay{
+    position:fixed;inset:0;z-index:50;display:flex;align-items:center;justify-content:center;padding:24px;
+    background:rgba(4,4,5,.72);backdrop-filter:blur(3px);
+  }
+  .sheet{
+    width:860px;max-width:100%;background:linear-gradient(180deg,#151517,#0F0F11);
+    border:1px solid var(--gold-line);border-radius:14px;overflow:hidden;
+    box-shadow:0 1px 0 rgba(251,243,220,.05) inset,0 32px 64px -24px #000;
+    display:flex;flex-direction:column;max-height:84vh;
+  }
+  .sheet-head{
+    padding:16px 20px;border-bottom:1px solid var(--gold-line);display:flex;align-items:flex-start;
+    justify-content:space-between;gap:14px;background:linear-gradient(180deg,rgba(212,175,55,.06),transparent);
+    flex:none;
+  }
+  .sheet-title{
+    font-size:15px;font-weight:600;letter-spacing:.01em;
+    background:linear-gradient(180deg,var(--g-100),var(--g-400));
+    -webkit-background-clip:text;background-clip:text;color:transparent;
+  }
+  .sheet-sub{font-size:11.5px;color:var(--txt-3);margin-top:4px;letter-spacing:.02em}
+
+  /* 两栏：左目录 + 右正文 */
+  .help{display:grid;grid-template-columns:172px 1fr;min-height:0;flex:1}
+  .help-nav{
+    border-right:1px solid var(--line-1);padding:14px 10px;background:rgba(0,0,0,.22);
+    display:flex;flex-direction:column;gap:2px;overflow:auto;
+  }
+  .help-nav button{
+    font:inherit;font-size:11.5px;text-align:left;padding:7px 10px;border-radius:7px;border:0;
+    background:none;color:var(--txt-3);cursor:pointer;transition:all .13s;line-height:1.45;
+  }
+  .help-nav button:hover{background:rgba(255,255,255,.04);color:var(--txt-2)}
+  .help-nav button.on{background:var(--gold-wash-2);color:var(--g-200);font-weight:600}
+  .help-nav .idx{
+    display:inline-block;width:16px;font-family:var(--mono);font-size:10px;color:var(--g-600);
+  }
+  .help-nav button.on .idx{color:var(--g-400)}
+
+  .help-body{padding:6px 26px 26px;overflow:auto;max-width:660px}
+  .help-sec{padding:20px 0 4px;border-top:1px solid var(--line-1)}
+  .help-sec:first-child{border-top:0;padding-top:16px}
+  .help-sec-title{
+    display:flex;align-items:center;gap:9px;font-size:13.5px;font-weight:600;color:var(--g-100);
+    letter-spacing:.01em;margin-bottom:11px;
+  }
+  .help-sec-title::before{
+    content:"";width:3px;height:14px;border-radius:2px;flex:none;
+    background:linear-gradient(180deg,var(--g-300),var(--g-600));
+    box-shadow:0 0 10px rgba(212,175,55,.5);
+  }
+  .help-lead{font-size:12.5px;line-height:1.85;color:var(--txt-2);margin-bottom:12px}
+  .help-lead strong{color:var(--g-200);font-weight:600}
+  .help-list{list-style:none;display:flex;flex-direction:column;gap:9px}
+  .help-list li{
+    position:relative;padding-left:16px;font-size:12.5px;line-height:1.8;color:var(--txt-2);
+  }
+  .help-list li::before{
+    content:"";position:absolute;left:0;top:9px;width:5px;height:5px;border-radius:1.5px;
+    background:var(--g-500);opacity:.85;transform:rotate(45deg);
+  }
+  .help-list li strong{color:var(--txt-1);font-weight:600}
+  .help-list li b{color:var(--g-200);font-weight:600}
+  code{
+    font-family:var(--mono);font-size:11px;padding:1.5px 6px;border-radius:5px;
+    background:rgba(212,175,55,.09);border:1px solid rgba(212,175,55,.16);color:var(--g-200);
+    white-space:nowrap;
+  }
+  .help-kv{display:flex;flex-direction:column;gap:1px;border-radius:9px;overflow:hidden;border:1px solid var(--line-1);margin-bottom:12px}
+  .help-kv div{display:grid;grid-template-columns:118px 1fr;gap:10px;padding:8px 12px;background:rgba(255,255,255,.018);font-size:11.5px}
+  .help-kv div:nth-child(even){background:rgba(0,0,0,.16)}
+  .help-kv dt{color:var(--txt-3)}
+  .help-kv dd{color:var(--txt-2)}
+  .help-tip{
+    display:flex;gap:9px;padding:10px 12px;border-radius:9px;margin-top:12px;font-size:11.5px;line-height:1.7;
+    background:var(--gold-wash);border:1px solid var(--gold-line);color:var(--txt-2);
+  }
+  .help-tip .mark{color:var(--g-300);font-weight:700;flex:none}
+</style>
+</head>
+<body>
+<div class="stage">
+  <div class="stage-label">① 卡片（黑金 · 金线边框）</div>
+  <div class="card">
+    <div class="card-head">
+      <div>
+        <div class="card-title">Model Hub</div>
+        <div class="card-desc">WorkBuddy 模型接入 DSH · 凭据只读复用</div>
+      </div>
+      <div class="head-actions">
+        <button class="btn icon" title="使用说明">?</button>
+        <button class="btn">刷新</button>
+        <button class="btn primary">一键认证</button>
+      </div>
+    </div>
+    <div class="tabs">
+      <button class="on">账号</button><button>渠道</button><button>记录</button><button>诊断</button>
+    </div>
+
+    <div class="row group">
+      <div class="row-main"><span class="group-label">WORKBUDDY</span></div>
+      <button class="btn sm">+ 添加账号</button>
+    </div>
+    <div class="row">
+      <span class="dot ok"></span>
+      <div class="row-main">
+        <div class="row-name">fuqinghe4<span class="badge cur">当前</span><span class="badge ok">可用</span></div>
+        <div class="row-meta">有凭据 · 今日 12 次 · 84.2k tokens · 上次成功 17:12</div>
+      </div>
+      <button class="switch on"></button>
+      <button class="btn sm">测试</button>
+      <button class="btn sm">设为当前</button>
+      <button class="btn sm danger">删除</button>
+    </div>
+    <div class="row">
+      <span class="dot off"></span>
+      <div class="row-main">
+        <div class="row-name">fuqinghe950917<span class="badge">已停用</span></div>
+        <div class="row-meta">有凭据 · 今日 0 次 · 未参与池</div>
+      </div>
+      <button class="switch"></button>
+      <button class="btn sm">测试</button>
+      <button class="btn sm">设为当前</button>
+      <button class="btn sm danger">删除</button>
+    </div>
+    <div class="row group">
+      <div class="row-main"><span class="group-label">QODER CN</span></div>
+      <button class="btn sm">+ 添加账号</button>
+    </div>
+    <div class="row">
+      <span class="dot warn"></span>
+      <div class="row-main">
+        <div class="row-name">17802927290<span class="badge err">熔断中</span></div>
+        <div class="row-meta">有凭据 · 今日 3 次 · 12.1k tokens · 冷却至 17:22</div>
+      </div>
+      <button class="switch on"></button>
+      <button class="btn sm">测试</button>
+      <button class="btn sm">设为当前</button>
+      <button class="btn sm danger">删除</button>
+    </div>
+  </div>
+
+  <div class="stage-label">② 记录栏</div>
+  <div class="card">
+    <div class="tabs"><button>账号</button><button>渠道</button><button class="on">记录</button><button>诊断</button></div>
+    <div class="row" style="justify-content:space-between">
+      <div class="row-main">
+        <div class="row-name">今日</div>
+        <div class="row-meta">15 次请求 · 96.3k tokens · 平均 61.4 tok/s</div>
+      </div>
+      <button class="btn sm">查看全部 →</button>
+    </div>
+    <table class="table">
+      <thead><tr><th>时间</th><th>账号</th><th>模型</th><th class="num">TTFT</th><th class="num">tok/s</th><th class="num">out</th></tr></thead>
+      <tbody>
+        <tr><td class="mono">17:12:04</td><td>fuqinghe4</td><td>deepseek-v4.1-flash</td><td class="num">1.9s</td><td class="num tps">211.0</td><td class="num">530</td></tr>
+        <tr><td class="mono">17:08:41</td><td>fuqinghe4</td><td>deepseek-v4.1-pro</td><td class="num">3.4s</td><td class="num tps">98.2</td><td class="num">1.2k</td></tr>
+        <tr><td class="mono">16:55:19</td><td>17802927290</td><td>qwen3-coder-plus</td><td class="num">0.8s</td><td class="num tps">142.6</td><td class="num">318</td></tr>
+      </tbody>
+    </table>
+    <div class="note">卡片里只放最近 4 条，完整记录点「查看全部」。</div>
+  </div>
+</div>
+
+<div class="overlay">
+  <div class="sheet">
+    <div class="sheet-head">
+      <div>
+        <div class="sheet-title">Model Hub 使用说明</div>
+        <div class="sheet-sub">凭据只读复用 · 多账号池 · 请求记录</div>
+      </div>
+      <button class="btn icon">×</button>
+    </div>
+    <div class="help">
+      <div class="help-nav">
+        <button class="on"><span class="idx">01</span>面板是什么</button>
+        <button><span class="idx">02</span>凭据从哪来</button>
+        <button><span class="idx">03</span>多账号怎么加</button>
+        <button><span class="idx">04</span>模型与档位</button>
+        <button><span class="idx">05</span>记录与保留</button>
+        <button><span class="idx">06</span>出问题看哪里</button>
+      </div>
+      <div class="help-body">
+        <div class="help-sec">
+          <div class="help-sec-title">面板是什么</div>
+          <p class="help-lead">
+            把本机 <strong>WorkBuddy</strong> 与 <strong>Qoder CN</strong> 的模型接进 DSH 的模型选择器，
+            模型 id 带 <code>hub-</code> 前缀。所有请求经插件自己的本机回环 shim 转发 ——
+            记录（token / TTFT / tok·s / 状态码）只在那一层埋点，所以<b>只有走 hub- 模型的对话</b>才会出现在这里。
+          </p>
+          <ul class="help-list">
+            <li><strong>账号</strong>：增删启停、测试、切当前、按账号看今日消耗</li>
+            <li><strong>渠道</strong>：总开关 + 展开该渠道自己的模型清单（倍率、活动标记）</li>
+            <li><strong>记录</strong>：最近 4 条 + 「查看全部」弹层（筛选、统计、导出 CSV）</li>
+            <li><strong>诊断</strong>：凭据路径、token 有效期、上游错误原文、记录清理</li>
+          </ul>
+        </div>
+
+        <div class="help-sec">
+          <div class="help-sec-title">凭据从哪来（只读复用）</div>
+          <div class="help-kv">
+            <div><dt>WorkBuddy 桌面端</dt><dd><code>workbuddy-desktop-ai.info</code> 加密信封，用 App 自身 native binding 取密钥在内存里解开</dd></div>
+            <div><dt>插件自有 token</dt><dd><code>~/.dsh/model-hub/workbuddy-tokens/</code>，每账号一文件，权限 0600</dd></div>
+            <div><dt>Qoder PAT</dt><dd>面板贴的 PAT 落在 <code>model-hub/qoder-pats/</code>，换 jobToken 用</dd></div>
+          </div>
+          <div class="help-tip">
+            <span class="mark">!</span>
+            <span>数据库只存<b>凭据引用</b>（文件路径），绝不存明文；日志与报错统一隐去 token 全文；桌面端 auth 文件与 vault <b>永不回写</b>。</span>
+          </div>
+        </div>
+
+        <div class="help-sec">
+          <div class="help-sec-title">多账号怎么加</div>
+          <ul class="help-list">
+            <li><b>WorkBuddy</b>：桌面端换登另一个账号 → 点「一键认证」→ 解密验活后按 uid 自动新增一行，同一账号不会重复出现</li>
+            <li><b>Qoder</b>：「+ 添加账号」贴 <code>pt-</code> 开头的 PAT，备注名留空则用 userinfo 真名</li>
+            <li><b>设为当前</b> 决定池头：请求优先用它；失败（401/402/403/429）自动切下一个，连续 3 次失败熔断 10 分钟</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+</body>
+</html>

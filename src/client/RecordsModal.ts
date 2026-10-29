@@ -157,7 +157,7 @@ export function RecordsModal(props: { onClose: () => void }): React.ReactElement
             { style: { display: "flex", gap: 6 } },
             h("button", { className: "dmh-btn", onClick: exportCsv, disabled: rows.length === 0 }, "导出 CSV"),
             h("button", { className: "dmh-btn", onClick: () => void load() }, "刷新"),
-            h("button", { className: "dmh-btn", onClick: props.onClose, "aria-label": "关闭" }, "×"),
+            h("button", { className: "dmh-btn dmh-icon", onClick: props.onClose, "aria-label": "关闭" }, "×"),
           ),
         ),
 

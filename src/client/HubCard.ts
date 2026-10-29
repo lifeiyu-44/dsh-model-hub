@@ -550,7 +550,7 @@ export function HubCard(): React.ReactElement {
             h(
               "button",
               {
-                className: "dmh-btn",
+                className: "dmh-btn dmh-icon",
                 title: "使用说明",
                 "aria-label": "使用说明",
                 onClick: () => setHelpOpen(true),

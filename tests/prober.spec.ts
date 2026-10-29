@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
@@ -616,5 +616,77 @@ describe("账号显示名 = 真实身份", () => {
     const rows = queryAccounts(database) as { id: string; display_name: string }[];
     expect(rows.find((r) => r.id === `${QODER_CHANNEL}:default`)?.display_name).toBe("真名"); // 占位名被刷
     expect(rows.find((r) => r.id === `${QODER_CHANNEL}:custom`)?.display_name).toBe("我的小号"); // 备注名绝不覆盖
+  });
+
+  it("内置解密：加密 auth → 验活 → token 落盘 + 账号登记（按 uid 去重幂等）", async () => {
+    newHome();
+    pinEnv("LOCALAPPDATA", home);
+    const database = await freshDb();
+    const { state } = fakeState(database);
+    // 加密信封形状的桌面端 auth，写到 authCandidates 的固定候选位置
+    mkdirSync(join(home, "CodeBuddyExtension", "Data", "Public", "auth"), { recursive: true });
+    const encryptedPath = writeWorkbuddyAuth(
+      join(home, "CodeBuddyExtension", "Data", "Public", "auth", "workbuddy-desktop-ai.info"),
+      {
+        auth: { accessToken: { $wbEncrypted: 1, envelope: "fake" }, domain: "www.workbuddy.ai" },
+        account: { uid: "uid-decrypt-1" },
+      },
+    );
+    const fakeFetch = fakeCatalogFetch(200);
+    const deps: ProberDeps = {
+      fetchImpl: fakeFetch.fetchImpl,
+      decryptAuthFile: async () => ({
+        accessToken: "t-decrypted",
+        refreshToken: "r-decrypted",
+        nickname: "解密出的昵称",
+        accountUid: "uid-decrypt-1",
+        decrypt: true,
+        region: "global",
+      }),
+    };
+
+    const first = await oneClickAuth(deps, database, state);
+    const wb = first.channels.find((c) => c.id === GLOBAL_CHANNEL)!;
+    expect(wb.status).toBe("ok");
+    expect(wb.sources.some((s) => s.detail.includes("内置解密成功"))).toBe(true);
+    expect(wb.accountsAdded).toBe(1);
+
+    const rows = queryAccounts(database) as { id: string; display_name: string; credential_ref?: string }[];
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.display_name).toBe("解密出的昵称");
+    // token 文件落在我们自己的 workbuddy-tokens 目录
+    const tokenPath = join(home, "model-hub", "workbuddy-tokens");
+    const files = readdirSync(tokenPath);
+    expect(files).toHaveLength(1);
+    const stored = JSON.parse(readFileSync(join(tokenPath, files[0]!), "utf8"));
+    expect(stored.auth.accessToken).toBe("t-decrypted");
+    expect(stored.account.uid).toBe("uid-decrypt-1");
+    expect(encryptedPath).toContain("workbuddy-desktop-ai.info");
+
+    // 再跑一次：同 uid 复用账号行（不重复、accountsAdded=0）
+    const second = await oneClickAuth(deps, database, state);
+    const wb2 = second.channels.find((c) => c.id === GLOBAL_CHANNEL)!;
+    expect(wb2.accountsAdded).toBe(0);
+    expect(queryAccounts(database)).toHaveLength(1);
+  });
+
+  it("未注入解密能力时：加密来源保持 encrypted 三态（不 spawn App、不登记）", async () => {
+    newHome();
+    pinEnv("LOCALAPPDATA", home);
+    const database = await freshDb();
+    const { state } = fakeState(database);
+    mkdirSync(join(home, "CodeBuddyExtension", "Data", "Public", "auth"), { recursive: true });
+    writeWorkbuddyAuth(
+      join(home, "CodeBuddyExtension", "Data", "Public", "auth", "workbuddy-desktop-ai.info"),
+      {
+        auth: { accessToken: { $wbEncrypted: 1, envelope: "fake" }, domain: "www.workbuddy.ai" },
+        account: { uid: "uid-plain-scan" },
+      },
+    );
+    const report = await oneClickAuth({}, database, state);
+    const wb = report.channels.find((c) => c.id === GLOBAL_CHANNEL)!;
+    expect(wb.sources.some((s) => s.status === "encrypted")).toBe(true);
+    expect(wb.accountsAdded).toBe(0);
+    expect(queryAccounts(database)).toHaveLength(0);
   });
 });

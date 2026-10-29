@@ -1,9 +1,11 @@
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { join } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import { HUB_DIR_NAME, PROVIDER_PREFIX } from "../constants.js";
 import { authCandidates, parseAuthDocument, type AuthKind } from "../channels/workbuddy/auth.js";
 import { listVaultEntries } from "../channels/workbuddy/vault.js";
+import { writeWorkbuddyTokenFile } from "../channels/workbuddy/token-store.js";
 import { fetchCatalog } from "../channels/workbuddy/catalog.js";
 import {
   exchangePat as exchangePatLive, listPatFiles, resolveDshHome,
@@ -43,6 +45,22 @@ export interface ProberDeps {
   exchangePat?: typeof exchangePatLive;
   /** 缺省 resolveDshHome()。 */
   dshHome?: string;
+  /**
+   * 桌面端加密凭据的内置解密（缺省**不启用**：生产装配显式注入
+   * `realDecryptAuthFile`）。给了它，一键认证遇到 `{$wbEncrypted}` 信封会
+   * 尝试向 WorkBuddy App 取 key 解开、验活、落 token 文件并登记账号 ——
+   * 不再依赖 dsh-connect-workbuddy 的 vault。测试不注入 = 保持旧的
+   * encrypted 三态报告，不 spawn App。
+   */
+  decryptAuthFile?: (path: string) => Promise<{
+    accessToken: string;
+    refreshToken?: string;
+    nickname?: string;
+    accountUid?: string;
+    decrypt: boolean;
+    region?: "cn" | "global";
+    expiresAtMs?: number;
+  }>;
 }
 
 export interface OneClickSource {
@@ -97,6 +115,29 @@ function redact(text: string, pats: string[]): string {
 function statusFromError(message: string): number | undefined {
   const match = /HTTP (\d{3})/.exec(message);
   return match === null ? undefined : Number(match[1]);
+}
+
+/**
+ * 按 uid 在已有账号的凭据文件里找账号 id。
+ * vault json 与自写 token 文件都带 `account.uid`（明文），因此不需要额外列。
+ */
+function findAccountIdByUid(db: DatabaseSync, uid: string): string | undefined {
+  const rows = db
+    .prepare("SELECT id, credential_ref FROM accounts WHERE channel_id = ? AND deleted = 0")
+    .all(PROVIDER_GLOBAL) as { id: string; credential_ref: string | null }[];
+  for (const row of rows) {
+    if (row.credential_ref === null || row.credential_ref === "") continue;
+    try {
+      const doc = JSON.parse(readFileSync(row.credential_ref, "utf8").replace(/^\uFEFF/, "")) as Record<string, unknown>;
+      const account = (typeof doc["account"] === "object" && doc["account"] !== null
+        ? (doc["account"] as Record<string, unknown>)
+        : undefined);
+      if (account?.["uid"] === uid) return row.id;
+    } catch {
+      /* 读不了/坏文件：跳过，不影响其它账号的匹配 */
+    }
+  }
+  return undefined;
 }
 
 /**
@@ -172,9 +213,19 @@ function pickSlug(db: DatabaseSync, dir: string, pat: string, displayName: strin
  * 只用于兜底；抛出意外异常时外层 fail-soft catch 拿**已收集的部分**过 redact
  * —— 收集必须边扫边做，事后补不回来。
  */
-function probeWorkbuddySources(secrets: string[]): { sources: OneClickSource[]; present: OneClickSource[]; entries: ReturnType<typeof listVaultEntries> } {
+async function probeWorkbuddySources(
+  deps: ProberDeps,
+  secrets: string[],
+): Promise<{
+  sources: OneClickSource[];
+  present: OneClickSource[];
+  entries: ReturnType<typeof listVaultEntries>;
+  /** 内置解密成功并验活的桌面端凭据（去重导入与 token 落盘用）。 */
+  decrypted: { path: string; decrypted: Awaited<ReturnType<NonNullable<ProberDeps["decryptAuthFile"]>>> }[];
+}> {
   const sources: OneClickSource[] = [];
   const present: OneClickSource[] = [];
+  const decryptedOut: { path: string; decrypted: Awaited<ReturnType<NonNullable<ProberDeps["decryptAuthFile"]>>> }[] = [];
   const candidates = authCandidates();
   const explicit = process.env["WORKBUDDY_AUTH_FILE"];
   for (const path of candidates) {
@@ -197,13 +248,43 @@ function probeWorkbuddySources(secrets: string[]): { sources: OneClickSource[]; 
       continue;
     }
     if (token !== undefined) secrets.push(token);
+
+    // 加密信封 + 注入了内置解密：向 WorkBuddy App 要 key 解开 → 验活 →
+    // 收集起来给 oneClickAuth 落 token 文件并登记账号（换号后一键认证即多一个账号）。
+    if (kind === "encrypted" && deps.decryptAuthFile !== undefined) {
+      try {
+        const decrypted = await deps.decryptAuthFile(path);
+        secrets.push(decrypted.accessToken);
+        // 验活判据与 testAccount 一致：真拉一次目录（HTTP ok 即成功）
+        await withFetch(deps.fetchImpl, () => fetchCatalog(decrypted.region ?? "global", decrypted.accessToken));
+        decryptedOut.push({ path, decrypted });
+        const ok: OneClickSource = {
+          source: path,
+          status: "ok",
+          detail: `${path}（App 内置解密成功，token 验活通过）`,
+        };
+        sources.push(ok);
+        present.push(ok);
+        continue;
+      } catch (error) {
+        const failed: OneClickSource = {
+          source: path,
+          status: "encrypted",
+          detail: redact(`${path}（加密信封；内置解密失败：${messageOf(error)}）`, secrets),
+        };
+        sources.push(failed);
+        present.push(failed);
+        continue;
+      }
+    }
+
     const entry: OneClickSource = {
       source: path,
       status: kind === "plain" ? "ok" : kind,
       detail: kind === "plain"
         ? `${path}（明文 token 可用）`
         : kind === "encrypted"
-          ? `${path}（token 是加密信封，装 dsh-connect-workbuddy 解一次即可用）`
+          ? `${path}（token 是加密信封；一键认证需内置解密，或装 dsh-connect-workbuddy 写一次 vault）`
           : `${path}（文件里没有可用的 accessToken）`,
     };
     sources.push(entry);
@@ -222,7 +303,7 @@ function probeWorkbuddySources(secrets: string[]): { sources: OneClickSource[]; 
       detail: `未找到 WorkBuddy 登录文件；已搜索：${candidates.join("、")}`,
     });
   }
-  return { sources, present, entries };
+  return { sources, present, entries, decrypted: decryptedOut };
 }
 
 /**
@@ -296,40 +377,70 @@ export async function oneClickAuth(deps: ProberDeps, db: DatabaseSync, state: Hu
   const qoderSecrets: string[] = [];
 
   try {
-    const { sources, present, entries } = probeWorkbuddySources(wbSecrets);
+    const { sources, present, entries, decrypted } = await probeWorkbuddySources(deps, wbSecrets);
     let accountsAdded = 0;
-    if (entries.length > 0) {
-      const live = queryAccounts(db) as { id: string; channel_id: string }[];
-      const channelHasLive = live.some((a) => a.channel_id === PROVIDER_GLOBAL);
-      // 去重必须对**全集 id（含软删）**：upsertOneAccount 的软删守卫（seed.ts）会
-      // 拦下重导入，若只对 live 去重，软删 id 会漏进 fresh、accountsAdded 虚报
-      // —— 用户删号后再扫会看到「接管 1 个账号」的假成功、账号却永不出现。
-      // 与 routes/write.ts 的 accounts/add 同款（I2）。
-      const taken = new Set(
-        (db.prepare("SELECT id FROM accounts").all() as { id: string }[]).map((row) => row.id),
-      );
-      const channel: ChannelSeed = { id: PROVIDER_GLOBAL, kind: "workbuddy", displayName: "WorkBuddy Global" };
-      const fresh: AccountSeed[] = [];
-      for (const entry of entries) {
-        const id = `${PROVIDER_GLOBAL}:${entry.accountId}`;
-        if (taken.has(id)) continue; // 幂等：已存在（含软删）跳过，不计入 accountsAdded
-        fresh.push({
-          id,
-          channelId: PROVIDER_GLOBAL,
-          // 显示名用真实身份：vault 里的明文 nickname，退回 uid 前缀，再退回文件名 ——
-          // 用户要在面板上看出「这是谁」，而不是一排「WorkBuddy 主账号」。
-          displayName:
-            entry.identity.nickname ??
-            (entry.identity.uid !== undefined ? `WB · ${entry.identity.uid.slice(0, 8)}` : entry.accountId),
-          credentialRef: entry.source,
-          // 渠道一个当前账号都没有时，首个新账号顶上 current（选择器本就有池序兜底）
-          isCurrent: fresh.length === 0 && !channelHasLive,
-        });
-      }
-      if (fresh.length > 0) {
-        seedChannelsAndAccounts(db, [channel], fresh);
-        accountsAdded = fresh.length;
-      }
+    const home = deps.dshHome ?? resolveDshHome();
+    const live = queryAccounts(db) as { id: string; channel_id: string }[];
+    const channelHasLive = live.some((a) => a.channel_id === PROVIDER_GLOBAL);
+    // 去重必须对**全集 id（含软删）**：upsertOneAccount 的软删守卫（seed.ts）会
+    // 拦下重导入，若只对 live 去重，软删 id 会漏进 fresh、accountsAdded 虚报
+    // —— 用户删号后再扫会看到「接管 1 个账号」的假成功、账号却永不出现。
+    // 与 routes/write.ts 的 accounts/add 同款（I2）。
+    const taken = new Set(
+      (db.prepare("SELECT id FROM accounts").all() as { id: string }[]).map((row) => row.id),
+    );
+    const channel: ChannelSeed = { id: PROVIDER_GLOBAL, kind: "workbuddy", displayName: "WorkBuddy Global" };
+    const fresh: AccountSeed[] = [];
+    for (const entry of entries) {
+      const id = `${PROVIDER_GLOBAL}:${entry.accountId}`;
+      if (taken.has(id)) continue; // 幂等：已存在（含软删）跳过，不计入 accountsAdded
+      fresh.push({
+        id,
+        channelId: PROVIDER_GLOBAL,
+        // 显示名用真实身份：vault 里的明文 nickname，退回 uid 前缀，再退回文件名 ——
+        // 用户要在面板上看出「这是谁」，而不是一排「WorkBuddy 主账号」。
+        displayName:
+          entry.identity.nickname ??
+          (entry.identity.uid !== undefined ? `WB · ${entry.identity.uid.slice(0, 8)}` : entry.accountId),
+        credentialRef: entry.source,
+        // 渠道一个当前账号都没有时，首个新账号顶上 current（选择器本就有池序兜底）
+        isCurrent: fresh.length === 0 && !channelHasLive,
+      });
+    }
+    // 内置解密成功、验活通过的桌面端凭据：把明文 token 落进我们自己的
+    // workbuddy-tokens 目录（0600），再按 uid 去重登记 —— 换号登录后一键认证
+    // 就会「多一个账号」，不再依赖 dsh-connect-workbuddy 的 vault。
+    for (const { decrypted: dec } of decrypted) {
+      const uid = dec.accountUid ?? `anon-${createHash("sha256").update(String(decrypted.length)).digest("hex").slice(0, 12)}`;
+      const tokenPath = writeWorkbuddyTokenFile(home, {
+        accountUid: uid,
+        accessToken: dec.accessToken,
+        ...(dec.refreshToken === undefined ? {} : { refreshToken: dec.refreshToken }),
+        ...(dec.nickname === undefined ? {} : { nickname: dec.nickname }),
+        region: dec.region ?? "global",
+        ...(dec.expiresAtMs === undefined ? {} : { expiresAtMs: dec.expiresAtMs }),
+      });
+      // 同 uid 已有账号（vault 或历史 token 文件）→ 复用它的 id，只刷新
+      // 显示名/凭据引用；否则用 uid 哈希派生稳定 id。
+      const existingId =
+        findAccountIdByUid(db, uid) ??
+        (taken.has(`${PROVIDER_GLOBAL}:wb-${createHash("sha256").update(uid, "utf8").digest("hex").slice(0, 12)}`)
+          ? `${PROVIDER_GLOBAL}:wb-${createHash("sha256").update(uid, "utf8").digest("hex").slice(0, 12)}`
+          : undefined);
+      const id = existingId ?? `${PROVIDER_GLOBAL}:wb-${createHash("sha256").update(uid, "utf8").digest("hex").slice(0, 12)}`;
+      const isNew = existingId === undefined;
+      if (isNew && taken.has(id)) continue; // 软删账号：不复活
+      fresh.push({
+        id,
+        channelId: PROVIDER_GLOBAL,
+        displayName: dec.nickname ?? `WB · ${uid.slice(0, 8)}`,
+        credentialRef: tokenPath,
+        isCurrent: isNew && fresh.length === 0 && !channelHasLive,
+      });
+    }
+    if (fresh.length > 0) {
+      seedChannelsAndAccounts(db, [channel], fresh);
+      accountsAdded = fresh.filter((a) => !taken.has(a.id)).length;
     }
     // 池非空才 ensure：池空时 hub-state 建了 runtime 也会因拉不到目录而空转
     if (state.poolSize(PROVIDER_GLOBAL) > 0) await state.ensureRuntime(PROVIDER_GLOBAL);

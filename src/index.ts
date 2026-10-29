@@ -7,8 +7,10 @@ import { HUB_DB_NAME, HUB_DIR_NAME, PROVIDER_PREFIX } from "./constants.js";
 import { openHubDatabase } from "./store/db.js";
 import { seedChannelsAndAccounts } from "./store/seed.js";
 import { pruneRequests } from "./store/retention.js";
-import { detectCredential } from "./channels/workbuddy/auth.js";
+import { detectCredential, parseAuthDocument } from "./channels/workbuddy/auth.js";
 import { readWorkbuddyVault, vaultIdentityOf } from "./channels/workbuddy/vault.js";
+import { realDecryptAuthFile } from "./channels/workbuddy/at-rest.js";
+import { writeWorkbuddyTokenFile } from "./channels/workbuddy/token-store.js";
 import { createSessionManager } from "./channels/qoder/credentials.js";
 import { createHubState } from "./state/hub-state.js";
 import {
@@ -122,16 +124,48 @@ function applyInner(ctx: any, config: any): void {
     //
     // 凭据来源按顺序试：
     //   1. 桌面端 auth 文件里的**明文** token（旧版桌面端才这样）
-    //   2. dsh-connect-workbuddy 已解好的 vault（本机的实际情况 —— 桌面端
-    //      auth 是 AES 信封，而本机没装 WorkBuddy App，解不了）
-    // 两条都拿不到就如实报缺，不假装成功。
+    //   2. 桌面端 auth 文件里的**加密信封** → 内置解密（向已安装的 WorkBuddy
+    //      App 要密钥，MODEL HUB 自己解，不再依赖 dsh-connect-workbuddy）；
+    //      解出的明文 token 落到我们自己的 workbuddy-tokens/<uid>.json（0600）
+    //   3. dsh-connect-workbuddy 已解好的 vault（历史来源，只读复用）
+    // 三条都拿不到就如实报缺，不假装成功。
     const fromFile = detectCredential();
     const plainFromFile =
       fromFile !== undefined && fromFile.parsed.kind === "plain" && fromFile.parsed.token !== undefined
         ? { source: fromFile.path, parsed: fromFile.parsed }
         : undefined;
-    const fromVault = plainFromFile === undefined ? readWorkbuddyVault() : undefined;
-    const credential = plainFromFile ?? fromVault;
+    let decryptedFromFile: { source: string; parsed: ReturnType<typeof parseAuthDocument> & { token: string } } | undefined;
+    if (plainFromFile === undefined && fromFile !== undefined && fromFile.parsed.kind === "encrypted") {
+      try {
+        const decrypted = await realDecryptAuthFile(fromFile.path);
+        const tokenPath = writeWorkbuddyTokenFile(resolveDshHome(), {
+          accountUid: decrypted.accountUid ?? "unknown-workbuddy-account",
+          accessToken: decrypted.accessToken,
+          ...(decrypted.refreshToken === undefined ? {} : { refreshToken: decrypted.refreshToken }),
+          ...(decrypted.nickname === undefined ? {} : { nickname: decrypted.nickname }),
+          region: decrypted.region,
+          ...(decrypted.expiresAtMs === undefined ? {} : { expiresAtMs: decrypted.expiresAtMs }),
+        });
+        decryptedFromFile = {
+          source: tokenPath,
+          parsed: {
+            kind: "plain",
+            region: decrypted.region,
+            token: decrypted.accessToken,
+            ...(decrypted.refreshToken === undefined ? {} : { refreshToken: decrypted.refreshToken }),
+            ...(decrypted.expiresAtMs === undefined ? {} : { expiresAtMs: decrypted.expiresAtMs }),
+          },
+        };
+        ctx.logger?.info?.(
+          `dsh-model-hub: 桌面端加密凭据已用内置解密接管（${fromFile.path}）→ ${tokenPath}`,
+        );
+      } catch (error) {
+        ctx.logger?.warn?.("dsh-model-hub: 桌面端加密凭据内置解密失败，回落到 vault", error);
+      }
+    }
+    const fromVault =
+      plainFromFile === undefined && decryptedFromFile === undefined ? readWorkbuddyVault() : undefined;
+    const credential = plainFromFile ?? decryptedFromFile ?? fromVault;
 
     if (credential === undefined) {
       const why = fromFile === undefined
@@ -328,7 +362,7 @@ function applyInner(ctx: any, config: any): void {
     registerWriteRoutes(ctx, {
       state,
       db,
-      proberDeps: {}, // 生产：fetch / exchangePat / dshHome 全用缺省实现
+      proberDeps: { decryptAuthFile: realDecryptAuthFile }, // 生产：内置解密启用；fetch/exchangePat/dshHome 用缺省实现
       retentionDays: () => readSetting(settings.retentionDays) ?? 90,
     });
 

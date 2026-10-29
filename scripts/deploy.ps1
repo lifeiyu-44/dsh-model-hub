@@ -1,4 +1,4 @@
-# dsh-model-hub 部署脚本
+﻿# dsh-model-hub 部署脚本
 #
 # 这个脚本存在的唯一理由：插件在**加载期**抛错会让 host fatal 退出，
 # 进而触发 DSH 把 profile 重置为默认（bundles 清空、cordis.patch.yml 被覆盖），

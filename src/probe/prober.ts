@@ -7,6 +7,7 @@ import { listVaultEntries } from "../channels/workbuddy/vault.js";
 import { fetchCatalog } from "../channels/workbuddy/catalog.js";
 import {
   exchangePat as exchangePatLive, listPatFiles, resolveDshHome,
+  type QoderSession,
 } from "../channels/qoder/credentials.js";
 import { seedChannelsAndAccounts, type AccountSeed, type ChannelSeed } from "../store/seed.js";
 import { markAccountResult } from "../store/mutations.js";
@@ -232,10 +233,14 @@ function probeWorkbuddySources(secrets: string[]): { sources: OneClickSource[]; 
  * `pats` 由调用方持有（与 {@link probeWorkbuddySources} 的 secrets 同一角色）：
  * 内部逐条 redact 用它，意外异常冒出时外层 fail-soft catch 用同一份兜底。
  */
-async function probeQoderSources(deps: ProberDeps, pats: string[]): Promise<OneClickSource[]> {
+async function probeQoderSources(
+  deps: ProberDeps,
+  pats: string[],
+): Promise<{ sources: OneClickSource[]; validated: { source: string; session: QoderSession }[] }> {
   const home = deps.dshHome ?? resolveDshHome();
   const exchange = deps.exchangePat ?? exchangePatLive;
   const sources: OneClickSource[] = [];
+  const validated: { source: string; session: QoderSession }[] = [];
   const candidates: { source: string; pat: string }[] = [];
 
   const legacy = join(home, "qoder", "pat");
@@ -260,7 +265,10 @@ async function probeQoderSources(deps: ProberDeps, pats: string[]): Promise<OneC
   for (const candidate of candidates) {
     pats.push(candidate.pat);
     try {
-      await exchange(candidate.pat, candidate.source);
+      // 会话留下：userinfo 的 name/email 是账号真实身份，oneClickAuth 拿它
+      // 把通用占位名（「Qoder CN 账号」）刷成真名 —— 换号/多账号才看得出来。
+      const session = await exchange(candidate.pat, candidate.source);
+      validated.push({ source: candidate.source, session });
       sources.push({ source: candidate.source, status: "ok", detail: `${candidate.source}（PAT 验活通过）` });
     } catch (error) {
       sources.push({
@@ -270,7 +278,7 @@ async function probeQoderSources(deps: ProberDeps, pats: string[]): Promise<OneC
       });
     }
   }
-  return sources;
+  return { sources, validated };
 }
 
 /**
@@ -308,7 +316,11 @@ export async function oneClickAuth(deps: ProberDeps, db: DatabaseSync, state: Hu
         fresh.push({
           id,
           channelId: PROVIDER_GLOBAL,
-          displayName: entry.accountId,
+          // 显示名用真实身份：vault 里的明文 nickname，退回 uid 前缀，再退回文件名 ——
+          // 用户要在面板上看出「这是谁」，而不是一排「WorkBuddy 主账号」。
+          displayName:
+            entry.identity.nickname ??
+            (entry.identity.uid !== undefined ? `WB · ${entry.identity.uid.slice(0, 8)}` : entry.accountId),
           credentialRef: entry.source,
           // 渠道一个当前账号都没有时，首个新账号顶上 current（选择器本就有池序兜底）
           isCurrent: fresh.length === 0 && !channelHasLive,
@@ -333,7 +345,20 @@ export async function oneClickAuth(deps: ProberDeps, db: DatabaseSync, state: Hu
   }
 
   try {
-    const sources = await probeQoderSources(deps, qoderSecrets);
+    const { sources, validated } = await probeQoderSources(deps, qoderSecrets);
+    // 验活成功的来源顺手把**通用占位名**刷成真实身份（userinfo 的 name/email）。
+    // 只动「Qoder CN 账号」这个启动默认名 —— 用户自己起过的备注名绝不覆盖；
+    // 身份也拿不到时（fake session 没带 name/email）保持原名。
+    for (const { source, session } of validated) {
+      const identityName = session.name || session.email || "";
+      if (identityName === "") continue;
+      const row = db
+        .prepare("SELECT id, display_name FROM accounts WHERE credential_ref = ? AND deleted = 0")
+        .get(source) as { id: string; display_name: string } | undefined;
+      if (row !== undefined && row.display_name === "Qoder CN 账号") {
+        db.prepare("UPDATE accounts SET display_name = ? WHERE id = ?").run(identityName, row.id);
+      }
+    }
     channels.push({ id: PROVIDER_QODER, status: channelStatusOf(sources), sources, accountsAdded: 0 });
   } catch (error) {
     channels.push({
@@ -455,7 +480,7 @@ export async function addQoderPat(
   writeFileSync(path, value, { encoding: "utf8", mode: 0o600 });
 
   try {
-    await (deps.exchangePat ?? exchangePatLive)(value, path);
+    const session = await (deps.exchangePat ?? exchangePatLive)(value, path);
     const accountId = `${PROVIDER_QODER}:${slug}`;
     const live = queryAccounts(db) as { channel_id: string }[];
     const isFirst = !live.some((a) => a.channel_id === PROVIDER_QODER);
@@ -465,7 +490,8 @@ export async function addQoderPat(
       [{
         id: accountId,
         channelId: PROVIDER_QODER,
-        displayName: displayName?.trim() ? displayName.trim() : slug,
+        // 显示名优先级：用户备注 > userinfo 真名 > 邮箱 > slug —— 一眼看出这是谁
+        displayName: displayName?.trim() ? displayName.trim() : session.name || session.email || slug,
         credentialRef: path,
         isCurrent: isFirst, // 渠道首个账号顶 current；后续账号不抢（makeCurrent 可手动切）
       }],

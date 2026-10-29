@@ -27,6 +27,31 @@ export interface VaultEntry {
   source: string;
   region: Region;
   parsed: ParsedAuth;
+  /**
+   * 账号身份（面板显示名用）。两个字段都可能缺：
+   * nickname 是 `{$wbEncrypted}` 信封时视为未知（这里绝不解密）。
+   */
+  identity: VaultIdentity;
+}
+
+/** vault json `account` 段里能直接读到的身份（明文才有；信封不算）。 */
+export interface VaultIdentity {
+  uid?: string;
+  nickname?: string;
+}
+
+/**
+ * 从 vault json 提取账号身份。只有**明文字符串**才算数：
+ * 新版桌面端把 nickname 也换成 `{$wbEncrypted}` 信封，那种在这里视为未知，
+ * 调用方退回 uid 前缀或文件名 —— 绝不在这里尝试解密。
+ */
+export function vaultIdentityOf(doc: Record<string, unknown>): VaultIdentity {
+  const account = doc["account"];
+  if (typeof account !== "object" || account === null) return {};
+  const rec = account as Record<string, unknown>;
+  const uid = typeof rec["uid"] === "string" && rec["uid"] !== "" ? rec["uid"] : undefined;
+  const nickname = typeof rec["nickname"] === "string" && rec["nickname"] !== "" ? rec["nickname"] : undefined;
+  return { ...(uid === undefined ? {} : { uid }), ...(nickname === undefined ? {} : { nickname }) };
 }
 
 /** vault 的区域目录，扫描顺序与旧 readWorkbuddyVault 一致（global 优先）。 */
@@ -63,6 +88,7 @@ export function listVaultEntries(root: string = join(resolveDshHome(), "workbudd
           accountId: name.slice(0, -".json".length),
           source,
           region,
+          identity: vaultIdentityOf(doc),
           parsed: {
             kind: "plain",
             region,

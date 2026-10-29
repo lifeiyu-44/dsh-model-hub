@@ -1,4 +1,4 @@
-import { statSync } from "node:fs";
+import { readFileSync, statSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { resolveDshHome } from "@deepseek-ai/dsh-home-paths";
@@ -8,7 +8,7 @@ import { openHubDatabase } from "./store/db.js";
 import { seedChannelsAndAccounts } from "./store/seed.js";
 import { pruneRequests } from "./store/retention.js";
 import { detectCredential } from "./channels/workbuddy/auth.js";
-import { readWorkbuddyVault } from "./channels/workbuddy/vault.js";
+import { readWorkbuddyVault, vaultIdentityOf } from "./channels/workbuddy/vault.js";
 import { createSessionManager } from "./channels/qoder/credentials.js";
 import { createHubState } from "./state/hub-state.js";
 import {
@@ -149,6 +149,17 @@ function applyInner(ctx: any, config: any): void {
     }
 
     if (credential !== undefined) {
+      // 显示名用真实身份：vault json 的 account.nickname（明文才有）→ uid 前缀 →
+      // 通用默认名。换号/多账号时面板一眼可辨，不再是一排「WorkBuddy 主账号」。
+      // 读不到就退回默认名，不影响凭据本身。
+      let wbDisplayName = "WorkBuddy 主账号";
+      try {
+        const identity = vaultIdentityOf(JSON.parse(readFileSync(credential.source, "utf8")) as Record<string, unknown>);
+        wbDisplayName =
+          identity.nickname ?? (identity.uid !== undefined ? `WB · ${identity.uid.slice(0, 8)}` : wbDisplayName);
+      } catch {
+        /* 身份读不到就退回默认名 */
+      }
       // 先把渠道与账号登记上 —— 面板的「渠道」「账号」两栏靠这两张表，
       // 而它们不随请求写入。少了这一步，没发过请求时面板看起来像坏了。
       // 写失败不影响 provider（诊断信息而已），所以只记日志。
@@ -160,7 +171,7 @@ function applyInner(ctx: any, config: any): void {
             {
               id: `${PROVIDER_GLOBAL}:default`,
               channelId: PROVIDER_GLOBAL,
-              displayName: "WorkBuddy 主账号",
+              displayName: wbDisplayName,
               credentialRef: credential.source, // 凭据只存引用，绝不落明文
               isCurrent: true,
             },
@@ -232,7 +243,9 @@ function applyInner(ctx: any, config: any): void {
             {
               id: `${PROVIDER_QODER}:default`,
               channelId: PROVIDER_QODER,
-              displayName: "Qoder CN 账号",
+              // 显示名用 userinfo 的真名/邮箱：换号重启后一眼可辨（seed 的
+              // DO UPDATE 会把旧占位名刷新成当前身份）。
+              displayName: qoderSession.name || qoderSession.email || "Qoder CN 账号",
               credentialRef: qoderSession.source,
               isCurrent: true,
             },

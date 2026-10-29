@@ -114,11 +114,11 @@ function plainAuthDoc(token: string, domain = "www.workbuddy.ai"): unknown {
   return { auth: { accessToken: token, domain, expiresIn: 3_000, lastRefreshTime: 1_700_000_000_000 } };
 }
 
-function seedVault(accountId: string, token: string): string {
+function seedVault(accountId: string, token: string, account?: unknown): string {
   const dir = join(home, "workbuddy-vault", "global");
   mkdirSync(dir, { recursive: true });
   const source = join(dir, `${accountId}.json`);
-  writeFileSync(source, JSON.stringify({ auth: { accessToken: token, expiresAt: 999_999_999_999 } }));
+  writeFileSync(source, JSON.stringify({ auth: { accessToken: token, expiresAt: 999_999_999_999 }, ...(account === undefined ? {} : { account }) }));
   return source;
 }
 
@@ -555,5 +555,66 @@ describe("addQoderPat", () => {
     expect(error!.message).not.toContain("pt-doomed00002"); // 抛给任务 7 路由层的文案同样过 redact
     expect(error!.message).toContain("（PAT 已隐去）");
     expect(existsSync(join(home, "model-hub", "qoder-pats", "doomed2.pat"))).toBe(false);
+  });
+
+  it("贴 PAT 未备注：显示名用 userinfo 真名（不再是 slug）", async () => {
+    newHome();
+    const database = await freshDb();
+    const { state } = fakeState(database);
+
+    const result = await addQoderPat(
+      { exchangePat: async (pat, source) => ({ jobToken: "jt", userID: "uid-1", name: "付庆贺", email: "f@x.com", expiresAt: Date.now() + 60_000, source }) },
+      database, state, "pt-named0000001",
+    );
+
+    const rows = queryAccounts(database) as { id: string; display_name: string }[];
+    expect(rows.find((r) => r.id === result.accountId)?.display_name).toBe("付庆贺");
+  });
+});
+
+describe("账号显示名 = 真实身份", () => {
+  it("WB 导入：vault 带 nickname → 显示名用 nickname；无 nickname 用 uid 前缀", async () => {
+    newHome();
+    const database = await freshDb();
+    const { state } = fakeState(database);
+    seedVault("withnick", "pt-wb-token-1", { uid: "12345678-aaaa-bbbb", nickname: "fuqinghe@x.com" });
+    seedVault("withuid", "pt-wb-token-2", { uid: "12345678-aaaa-bbbb" });
+    seedVault("noident", "pt-wb-token-3");
+
+    const report = await oneClickAuth({}, database, state);
+
+    const wb = report.channels.find((c) => c.id === GLOBAL_CHANNEL);
+    expect(wb?.accountsAdded).toBe(3);
+    const rows = queryAccounts(database) as { id: string; display_name: string }[];
+    const names = Object.fromEntries(rows.map((r) => [r.id, r.display_name]));
+    expect(names[`${GLOBAL_CHANNEL}:withnick`]).toBe("fuqinghe@x.com");      // nickname 优先
+    expect(names[`${GLOBAL_CHANNEL}:withuid`]).toBe("WB · 12345678");        // 无 nickname 退 uid 前缀
+    expect(names[`${GLOBAL_CHANNEL}:noident`]).toBe("noident");              // 什么都没有退文件名
+  });
+
+  it("oneClick：通用占位名「Qoder CN 账号」刷成 userinfo 真名；自定义备注名不动", async () => {
+    newHome();
+    const database = await freshDb();
+    const { state } = fakeState(database);
+    // legacy PAT（占位名账号的 credential_ref 指向它）
+    mkdirSync(join(home, "qoder"), { recursive: true });
+    writeFileSync(join(home, "qoder", "pat"), "pt-legacy000001");
+    // 另一个用户起过备注名的账号（贴 PAT 文件）
+    const patPath = writePatFile("custom.pat", "pt-custom00001");
+    seedChannelsAndAccounts(database,
+      [{ id: QODER_CHANNEL, kind: "qoder", displayName: "Qoder CN" }],
+      [
+        { id: `${QODER_CHANNEL}:default`, channelId: QODER_CHANNEL, displayName: "Qoder CN 账号", credentialRef: join(home, "qoder", "pat"), isCurrent: true },
+        { id: `${QODER_CHANNEL}:custom`, channelId: QODER_CHANNEL, displayName: "我的小号", credentialRef: patPath, isCurrent: false },
+      ]);
+
+    await oneClickAuth(
+      { exchangePat: async (pat, source) => ({ jobToken: "jt", userID: "u", name: "真名", email: "z@x.com", expiresAt: Date.now() + 60_000, source }) },
+      database, state,
+    );
+
+    const rows = queryAccounts(database) as { id: string; display_name: string }[];
+    expect(rows.find((r) => r.id === `${QODER_CHANNEL}:default`)?.display_name).toBe("真名"); // 占位名被刷
+    expect(rows.find((r) => r.id === `${QODER_CHANNEL}:custom`)?.display_name).toBe("我的小号"); // 备注名绝不覆盖
   });
 });

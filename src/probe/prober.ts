@@ -392,7 +392,12 @@ export async function oneClickAuth(deps: ProberDeps, db: DatabaseSync, state: Hu
     const channel: ChannelSeed = { id: PROVIDER_GLOBAL, kind: "workbuddy", displayName: "WorkBuddy Global" };
     const fresh: AccountSeed[] = [];
     for (const entry of entries) {
-      const id = `${PROVIDER_GLOBAL}:${entry.accountId}`;
+      // **uid 是账号的唯一身份**：同一个 uid 无论 id 派生成什么样（启动 seed 的
+      // `:default`、历史文件名 id、uid 哈希 id），都是同一个真实账号 —— 按 uid
+      // 找已有行刷新，绝不因 id 规则不同而插重复行（真机 2026-10-29：同一
+      // 账号在面板出现两行，即此因）。
+      const existingId = entry.identity.uid !== undefined ? findAccountIdByUid(db, entry.identity.uid) : undefined;
+      const id = existingId ?? `${PROVIDER_GLOBAL}:${entry.accountId}`;
       if (taken.has(id)) continue; // 幂等：已存在（含软删）跳过，不计入 accountsAdded
       fresh.push({
         id,

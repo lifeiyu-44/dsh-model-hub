@@ -578,7 +578,7 @@ describe("账号显示名 = 真实身份", () => {
     const database = await freshDb();
     const { state } = fakeState(database);
     seedVault("withnick", "pt-wb-token-1", { uid: "12345678-aaaa-bbbb", nickname: "fuqinghe@x.com" });
-    seedVault("withuid", "pt-wb-token-2", { uid: "12345678-aaaa-bbbb" });
+    seedVault("withuid", "pt-wb-token-2", { uid: "87654321-cccc-dddd" });
     seedVault("noident", "pt-wb-token-3");
 
     const report = await oneClickAuth({}, database, state);
@@ -587,9 +587,28 @@ describe("账号显示名 = 真实身份", () => {
     expect(wb?.accountsAdded).toBe(3);
     const rows = queryAccounts(database) as { id: string; display_name: string }[];
     const names = Object.fromEntries(rows.map((r) => [r.id, r.display_name]));
-    expect(names[`${GLOBAL_CHANNEL}:withnick`]).toBe("fuqinghe@x.com");      // nickname 优先
-    expect(names[`${GLOBAL_CHANNEL}:withuid`]).toBe("WB · 12345678");        // 无 nickname 退 uid 前缀
-    expect(names[`${GLOBAL_CHANNEL}:noident`]).toBe("noident");              // 什么都没有退文件名
+    // 无既有账号时按 uid 哈希派生稳定 id —— 显示名才是本用例的重点
+    expect(Object.values(names).sort()).toEqual(["WB · 87654321", "fuqinghe@x.com", "noident"]);
+  });
+
+  it("WB 导入：同 uid 的账号已存在（id 派生规则不同）→ 刷新该行而不是插重复行", async () => {
+    newHome();
+    const database = await freshDb();
+    const { state } = fakeState(database);
+    // 启动 seed 的形态：id 是 `:default`、credential_ref 指向 vault 文件
+    // （json 里的 account.uid 与待导入条目相同 —— 同一个真实账号）
+    const vaultPath = seedVault("3c5280f93a71195d53a1e56a", "pt-wb-token-x", { uid: "05261715-369f" });
+    seedChannelsAndAccounts(database,
+      [{ id: GLOBAL_CHANNEL, kind: "workbuddy", displayName: "WorkBuddy Global" }],
+      [{ id: `${GLOBAL_CHANNEL}:default`, channelId: GLOBAL_CHANNEL, displayName: "fuqinghe950917@gmail.com", credentialRef: vaultPath, isCurrent: true }]);
+
+    const report = await oneClickAuth({}, database, state);
+
+    const wb = report.channels.find((c) => c.id === GLOBAL_CHANNEL);
+    expect(wb?.accountsAdded).toBe(0); // 同 uid → 刷新而非新增
+    const rows = queryAccounts(database) as { id: string; display_name: string }[];
+    expect(rows).toHaveLength(1); // 绝不出现第二行
+    expect(rows[0]!.id).toBe(`${GLOBAL_CHANNEL}:default`);
   });
 
   it("oneClick：通用占位名「Qoder CN 账号」刷成 userinfo 真名；自定义备注名不动", async () => {

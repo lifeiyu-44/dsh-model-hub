@@ -32,7 +32,15 @@ const MODELS: HubModel[] = [
   },
 ];
 
-function adapterFor(models: HubModel[]) {
+/**
+ * 造一个 adapter。
+ *
+ * `withAttachments` 决定是否注入附件服务的两个钩子 —— 它正是「能不能收图」
+ * 的开关：pi-ai 在收到 image block 时会先要求 `resolveAttachments` 存在，
+ * 而我们的 profile 也按「钩子在不在」决定要不要声明 image 能力。
+ */
+function adapterFor(models: HubModel[], options: { withAttachments?: boolean } = {}) {
+  const withAttachments = options.withAttachments === true;
   return createHubAdapter({
     provider: PROVIDER,
     shimBaseUrl: SHIM,
@@ -42,6 +50,13 @@ function adapterFor(models: HubModel[]) {
     openAICompletionsApi,
     resolveRetryPolicy,
     PiAiAdapter,
+    ...(withAttachments
+      ? {
+          // 假附件服务：只需要存在，listModels 不读字节
+          resolveAttachments: () => ({}) as any,
+          resolveImageAccess: () => undefined,
+        }
+      : {}),
   });
 }
 
@@ -70,12 +85,26 @@ describe("createHubAdapter —— 产出的 provider 必须真的能出模型", 
     await expect(adapterFor([]).listModels(PROVIDER)).resolves.toEqual([]);
   });
 
-  it("即使上游说 supportsImages，也只声明纯文本", async () => {
-    // 实测（2026-10-28）：声明 image 后用户贴图会以
-    // `pi-ai image input requires the durable attachment service` 让整轮失败，
-    // 因为 adapter 没接 resolveAttachments。宣称做不到的能力比不宣称更糟。
+  it("接了附件服务后，按上游 supportsImages 如实声明图片能力", async () => {
+    // 实测（2026-10-29）：上游目录 25 个模型里 23 个 supportsImages=true，
+    // 真发一张 64×64 PNG → 200 回答「红色」。上游确实吃图，做不到的只是我们
+    // 这一侧 —— 接上 resolveAttachments / resolveImageAccess 之后就没有借口了。
     const withImage: HubModel[] = [{ ...MODELS[0]!, supportsImages: true }];
-    const listed = await adapterFor(withImage).listModels(PROVIDER);
+    const listed = await adapterFor(withImage, { withAttachments: true }).listModels(PROVIDER);
+    expect(listed[0]?.inputModalities).toEqual(["text", "image"]);
+  });
+
+  it("上游说 supportsImages=false 的模型仍只声明文本", async () => {
+    const noImage: HubModel[] = [{ ...MODELS[0]!, supportsImages: false }];
+    const listed = await adapterFor(noImage, { withAttachments: true }).listModels(PROVIDER);
+    expect(listed[0]?.inputModalities).toEqual(["text"]);
+  });
+
+  it("没有附件服务时退回纯文本（不宣称做不到的能力）", async () => {
+    // 钩子缺失时声明 image 只会在用户贴图时炸出 UNSUPPORTED_CONTENT，
+    // 不如如实说不能 —— 宿主会在发送前就拦下并给出清楚的提示。
+    const withImage: HubModel[] = [{ ...MODELS[0]!, supportsImages: true }];
+    const listed = await adapterFor(withImage, { withAttachments: false }).listModels(PROVIDER);
     expect(listed[0]?.inputModalities).toEqual(["text"]);
   });
 });

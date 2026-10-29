@@ -211,13 +211,29 @@ export function createRegisterAdapter(shim: ShimHandle): RegisterAdapterFn {
     let release: (() => void) | undefined;
 
     void (async () => {
-      const [{ PiAiAdapter }, { createProvider }, { openAICompletionsApi }, { resolveRetryPolicy }] = await Promise.all([
+      const [{ PiAiAdapter }, { createProvider }, { openAICompletionsApi }, { resolveRetryPolicy, resolveImageAttachmentAccess }] = await Promise.all([
         import("@deepseek-ai/dsh-llm-pi-ai"),
         import("@earendil-works/pi-ai"),
         import("@earendil-works/pi-ai/api/openai-completions.lazy"),
         import("@deepseek-ai/dsh-llm"),
       ]);
       if (released) return;
+
+      // 宿主的 durable attachment 服务与 fs 映射：图片输入的两个前提。
+      //
+      // 都是**每次请求现取**（惰性闭包），不是在这里取一次存起来：
+      // 插件装配可能早于这两个服务就绪，缓存 undefined 会让图片能力
+      // 永久失能，而用户看不出原因。
+      //
+      // 与宿主官方 `dsh-llm-pi-ai` 的写法一致（见其 registerPiAiFlows 里的
+      // `resolveAttachments: () => ctx.get("attachments")`）——
+      // 那是这条链路唯一的先例，照它做比自己发明可靠。
+      const hostCtx = ctx as {
+        get?: (name: string) => any;
+        llm: { registerAdapter(ids: string[], adapter: unknown): () => void };
+        logger?: Logger;
+      };
+      const resolveAttachments = () => hostCtx.get?.("attachments");
 
       const adapter = createHubAdapter({
         provider: providerId,
@@ -228,6 +244,13 @@ export function createRegisterAdapter(shim: ShimHandle): RegisterAdapterFn {
         openAICompletionsApi,
         resolveRetryPolicy,
         PiAiAdapter,
+        resolveAttachments,
+        resolveImageAccess: (attachments: any, ref: any) =>
+          resolveImageAttachmentAccess(
+            attachments,
+            (hostPath: string) => hostCtx.get?.("fs")?.processPathFromHostPath?.(hostPath),
+            ref,
+          ),
       });
 
       if (released) return;

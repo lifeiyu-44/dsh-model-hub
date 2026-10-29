@@ -65,6 +65,22 @@ export interface ProviderDeps {
   openAICompletionsApi: () => any;
   resolveRetryPolicy: (value: undefined, label: string) => any;
   PiAiAdapter: new (config: any) => any;
+  /**
+   * 宿主的 durable attachment 服务（`ctx.get("attachments")`）。
+   *
+   * **这是图片输入的唯一前提**：pi-ai 收到带 image block 的请求时会先要求
+   * 这个服务存在，否则直接抛
+   * `pi-ai image input requires the durable attachment service`。
+   * 装配层把它做成惰性函数 —— 插件可能先于 attachments 服务就绪，
+   * 每次请求现取才不会拿到 undefined 就永久失能。
+   */
+  resolveAttachments?: () => any;
+  /**
+   * 把一个附件引用映射成「当前工具执行世界」里的只读路径。
+   * 宿主的 `fs` 服务提供 `processPathFromHostPath`；拿不到就返回 undefined
+   * （图片仍能进请求，只是模型工具读不到本地副本）。
+   */
+  resolveImageAccess?: (attachments: any, ref: any) => any;
 }
 
 export interface BuildProviderInput extends ProviderDeps {
@@ -119,16 +135,25 @@ export function buildProviderProfile(input: BuildProviderInput): Record<string, 
     api: "openai-completions" as const,
     provider,
     baseUrl: shimBaseUrl,
-    // **只声明文本**，即使上游目录说 supportsImages。
+    // **图片输入如实按上游目录声明。**
     //
-    // 实测（2026-10-28）：声明 image 后，用户贴图会以
+    // 实测（2026-10-29）：
+    //   · 上游目录 25 个模型里 23 个 `supportsImages: true`；
+    //   · 真发一张 64×64 PNG + "这是什么颜色" → 200，回答「红色」。
+    // 也就是说上游确实吃图，之前做不到的只有我们这一侧。
+    //
+    // 之前的障碍（2026-10-28 实测）：pi-ai 收到 image block 时会先要求
+    // 宿主的 durable attachment 服务存在，否则抛
     // `pi-ai image input requires the durable attachment service`
-    // (UNSUPPORTED_CONTENT) 让整轮失败 —— 因为我们的 adapter 没有接
-    // 宿主的 `resolveAttachments` / `resolveImageAccess`，默认的注入路径不给它。
+    // (UNSUPPORTED_CONTENT)。现在 `createHubAdapter` 把
+    // `resolveAttachments` / `resolveImageAccess` 两个钩子接上了，
+    // 那个前提已经满足，所以可以如实声明能力。
     //
-    // 与其宣称一个做不到的能力、在用户贴图时才炸，不如如实声明纯文本：
-    // 宿主会在发送前就拦下并给出清楚的提示。要真支持图片，得先接上附件服务。
-    input: ["text"] as const,
+    // 仍然保留「没有附件服务就退回纯文本」的降级：钩子缺失时声明 image
+    // 只会在用户贴图时炸，不如如实说不能。
+    input: (input.resolveAttachments === undefined ? ["text"] : m.supportsImages ? ["text", "image"] : ["text"]) as
+      | readonly ["text"]
+      | readonly ["text", "image"],
     cost: NO_COST,
     contextWindow: m.contextWindow,
     maxTokens: m.maxTokens,
@@ -204,6 +229,19 @@ export function createHubAdapter(input: BuildProviderInput): any {
     profiles: () => new Map([[input.provider, profile]]),
     auth: INERT_AUTH,
     resolveApiKey: async () => input.shimToken,
+    // ── 图片输入的两个钩子 ──
+    //
+    // pi-ai 的图片链路是：宿主把用户贴的图存成 durable attachment（不可变、
+    // 内容寻址），请求里只放 `ImageAttachmentRef`；stream 时才由 pi-ai 自己
+    // 读字节、按模型路由的 target 尺寸重新编码，最终变成上游要的
+    // `image_url` 内容块。所以这里要提供的只是「服务在哪」与「怎么映射路径」，
+    // 不需要我们自己拼 base64 —— 那正是 2026-10-28 误判的地方。
+    //
+    // 两个都做成惰性：插件装配可能早于 attachments / fs 服务就绪，
+    // 每次请求现取才不会永久失能。缺服务时 pi-ai 会明确报
+    // `image input requires the durable attachment service`，不静默降级。
+    ...(input.resolveAttachments === undefined ? {} : { resolveAttachments: input.resolveAttachments }),
+    ...(input.resolveImageAccess === undefined ? {} : { resolveImageAccess: input.resolveImageAccess }),
   });
 }
 

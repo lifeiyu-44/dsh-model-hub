@@ -52,6 +52,10 @@ export class TurnTimer {
   onEnd(at: number, usage?: NormalizedUsage): TurnMetrics {
     const estimated = usage === undefined;
     const outputTokens = usage?.outputTokens ?? Math.floor(this.#chars / CHARS_PER_TOKEN);
+    // **没有首 token 就没有解码窗口**：那时不能说「解码用了整轮时长」——
+    // 那会把 TTFT 也算进解码，得到一个看似合理、实则与口径不符的速度。
+    // 宁可留空（面板显示 —），也不给一个错数（2026-10-29 修正：
+    // 之前退化成 durationMs 当窗口，导致 out=87/3.6s 算成 24 tok/s）。
     const decodeMs = this.#t2 === undefined ? undefined : at - this.#t2;
     return {
       ...(this.#t2 === undefined ? {} : { firstTokenMs: this.#t2 - this.#t0 }),

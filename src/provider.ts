@@ -215,6 +215,39 @@ export function buildProviderProfile(input: BuildProviderInput): Record<string, 
     streamIdleTimeoutMs: 300_000,
     retryPolicy: resolveRetryPolicy(undefined, "dsh-model-hub retryPolicy"),
 
+    // ── 默认思考档位：拉满（**只在全渠道模型都支持时**）──
+    //
+    // 用户要求（2026-10-29）：选中模型后默认就是最高思考档，手动调整过的
+    // 等级要记住，没有调整记录时用最高档。
+    //
+    // 宿主的取值链（`dsh-llm-pi-ai`）：
+    //   · 描述路径 modelInfo：
+    //       defaultLevel = describableReasoningLevel(model, profile.reasoning)
+    //       → reasoning.defaultEffort（客户端 `reasoningEffort ?? defaultEffort`）
+    //   · 请求路径 streamWithSnapshot：
+    //       resolveReasoningLevel(model, options.reasoningEffort ?? profile.reasoning)
+    //
+    // **两条路径对不支持的处理不一样**，这是关键：
+    //   describableReasoningLevel 不支持时静默返回 undefined（描述层不炸）；
+    //   resolveReasoningLevel     不支持时**抛 LlmError**（请求层直接失败）。
+    //
+    // 所以 `profile.reasoning` 不是「对支持的模型生效」的软默认 —— 它是
+    // 每次请求的兜底值。给一个模型不支持的档位，那个模型的**每个请求**都会
+    // 以 `does not support reasoning effort "high"` 失败。
+    //
+    // 实测（2026-10-29，tests/full-stack.spec.ts）：无条件写 "high" 之后，
+    // 非 reasoning 模型（reasoning: false，pi-ai 只认 off）当场抛错。
+    // Qoder 渠道是混合的（`is_reasoning` 有真有假），会真的踩到。
+    //
+    // 因此这里**只在全渠道模型都支持思考时**才设默认档：
+    //   · WorkBuddy：目录里 25 个模型统一 reasoning: true → 设 "high" ✓
+    //   · Qoder：混合 → 不设，非 reasoning 模型保持安全（reasoning 模型
+    //     的默认档由用户自选，不会因此报错）
+    //
+    // 用户手动调整过的档位仍然优先：客户端存在 selection.reasoningEffort 上，
+    // 只有它是 undefined 时才回落到这里。改的只是「没调过时的初值」。
+    ...(models.length > 0 && models.every((m) => m.reasoning === true) ? { reasoning: "high" as const } : {}),
+
     // ── 图片预算三件套（**缺一个就整轮报错**）──
     //
     // 真机事故（2026-10-29）：贴图发送后连报两次

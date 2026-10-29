@@ -141,6 +141,68 @@ describe("createHubAdapter —— 产出的 provider 必须真的能出模型", 
 
 describe("思考档位表", () => {
   /**
+   * 用户要求（2026-10-29）：选中模型后**默认就是最高思考档**，
+   * 手动调整过的等级要记住；没有调整记录时用最高档。
+   *
+   * 宿主的取值链（`dsh-llm-pi-ai` 的 modelInfo）：
+   *   defaultLevel = describableReasoningLevel(model, profile.reasoning)
+   *   客户端再 `reasoningEffort ?? reasoning?.defaultEffort` 取初值
+   *
+   * 所以 profile 里必须有 `reasoning: "high"`，否则 defaultEffort 缺失，
+   * 界面只能显示 Default（= 不带 reasoning_effort 发出去，上游按最低档跑）。
+   *
+   * 这里断言的是**对外可见的** defaultEffort，而不是 profile 内部字段 ——
+   * 中间还有 describableReasoningLevel 的合法性校验，只有它放行才算数。
+   */
+  it("选中模型后默认思考档位就是 high（defaultEffort）", async () => {
+    const models: HubModel[] = [
+      { id: "qfmodel", name: "Q", contextWindow: 1_000_000, maxTokens: 32_000, supportsImages: false, reasoning: true },
+    ];
+    const { adapter } = hubWithCapturedPi(models);
+    const model = (await adapter.resolveModel(PROVIDER, "qfmodel")) as any;
+    expect(model.reasoning?.defaultEffort).toBe("high");
+    // 可选档位里必须有 high，否则 defaultEffort 会被 describableReasoningLevel 丢掉
+    const efforts = (model.reasoning?.efforts ?? []).map((e: any) => e.id);
+    expect(efforts).toContain("high");
+  });
+
+  it("非 reasoning 模型不报 defaultEffort（不误伤，也不会拖垮 provider）", async () => {
+    const models: HubModel[] = [
+      { id: "plain", name: "P", contextWindow: 128_000, maxTokens: 8_000, supportsImages: false, reasoning: false },
+    ];
+    const { adapter } = hubWithCapturedPi(models);
+    const model = (await adapter.resolveModel(PROVIDER, "plain")) as any;
+    expect(model.reasoning).toBeUndefined();
+  });
+
+  /**
+   * **混合渠道不能设 provider 级默认档** —— 这条是真实生产风险的护栏。
+   *
+   * 宿主有两条路径，对「模型不支持该档位」的处理完全不同：
+   *   · 描述路径 describableReasoningLevel → 静默返回 undefined
+   *   · 请求路径 resolveReasoningLevel     → **抛 LlmError**
+   *
+   * 而 `profile.reasoning` 是**每次请求的兜底值**（`options.reasoningEffort
+   * ?? profile.reasoning`）。所以给一个模型不支持的档位，那个模型的每个
+   * 请求都会失败，不只是显示问题。
+   *
+   * Qoder 渠道是混合的（`is_reasoning` 有真有假），必须整体不设默认档；
+   * 否则非 reasoning 模型一选就报 `does not support reasoning effort "high"`。
+   */
+  it("混合渠道（有 reasoning 也有非 reasoning）不设 provider 级默认档", async () => {
+    const models: HubModel[] = [
+      { id: "thinker", name: "T", contextWindow: 200_000, maxTokens: 32_000, supportsImages: false, reasoning: true },
+      { id: "plain", name: "P", contextWindow: 128_000, maxTokens: 8_000, supportsImages: false, reasoning: false },
+    ];
+    const { adapter } = hubWithCapturedPi(models);
+    const thinker = (await adapter.resolveModel(PROVIDER, "thinker")) as any;
+    const plain = (await adapter.resolveModel(PROVIDER, "plain")) as any;
+    // 混合渠道：连支持思考的那个也不预置默认档，避免请求路径踩到不支持的分支
+    expect(thinker.reasoning?.defaultEffort).toBeUndefined();
+    expect(plain.reasoning).toBeUndefined();
+  });
+
+  /**
    * `resolveModel` 返回的是宿主投影（provider/id/name/context/reasoning），
    * 不携带 `thinkingLevelMap` / `compat` —— 这两个字段承载在发请求时真正
    * 用的 pi 模型对象上（openai-completions 直接读 `model.thinkingLevelMap`

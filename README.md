@@ -22,15 +22,28 @@
 构建产物（`lib/`、`client.js`）已随仓库提交，装完即可用，不需要本地构建：
 
 ```powershell
-# CLI 方式
-dsh plugin --profile desktop add github:lifeiyu-44/dsh-model-hub
+dsh plugin add github:lifeiyu-44/dsh-model-hub
 ```
 
 也可以在 GUI 里：侧边栏 **插件** → 添加插件 → 粘贴 `github:lifeiyu-44/dsh-model-hub`。
 
+指定版本（tag）安装：
+
+```powershell
+dsh plugin add github:lifeiyu-44/dsh-model-hub#v0.1.0
+```
+
 装完重启 DSH，到 **设置 → 插件 → DSH Model Hub** 配置账号。
 
 > 前置条件：Node.js `^22.19.0 || >=24`，以及 DSH 本体（插件通过 `peerDependencies` 使用宿主的 `@deepseek-ai/dsh-*` 包，不会重复安装）。
+
+### 从 npm 装
+
+包发布后也可以直接按包名安装：
+
+```powershell
+dsh plugin add dsh-model-hub
+```
 
 ### 从源码开发（贡献者）
 

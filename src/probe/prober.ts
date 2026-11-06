@@ -14,6 +14,7 @@ import {
 } from "../channels/qoder/credentials.js";
 import {
   assertTraeTokenFresh,
+  describeTraeVersion,
   discoverTraeSession,
   readTraeCredentialFile,
   traeAccountSuffixOf,
@@ -630,6 +631,12 @@ async function testTraeCredential(deps: ProberDeps, ref: string | null): Promise
   const candidates = catalog.models.slice(0, 3).map((model) => model.id);
   if (candidates.length === 0) throw new Error("Trae 目录为空，无法验活");
   const fetchImpl = deps.fetchImpl ?? fetch;
+  const version = describeTraeVersion(credential);
+  const versionContext = {
+    appVersionCode: credential.appVersionCode,
+    ...(credential.appVersionSource === undefined ? {} : { appVersionSource: credential.appVersionSource }),
+    ...(credential.productPath === undefined ? {} : { productPath: credential.productPath }),
+  };
   let lastError = "";
 
   for (const model of candidates) {
@@ -669,10 +676,10 @@ async function testTraeCredential(deps: ProberDeps, ref: string | null): Promise
         } catch {
           /* 保持空值，交给 explainTraeError 兜底 */
         }
-        lastError = explainTraeError(code, message);
+        lastError = explainTraeError(code, message, versionContext);
         continue;
       }
-      if (/event:(done|output)/.test(text)) return `Trae 验活通过（${ref}，模型 ${model}）`;
+      if (/event:(done|output)/.test(text)) return `Trae 验活通过（${ref}，模型 ${model}，${version.text}）`;
       lastError = "上游没有返回任何事件";
     } catch (error) {
       lastError = messageOf(error);

@@ -41,6 +41,43 @@ export const TRAE_DEFAULT_APP_ID = "6eefa01c-1036-4c7e-9ca5-d891f63bfcd8";
  */
 export const TRAE_DEFAULT_APP_VERSION_CODE = 1205510027010;
 
+/**
+ * 版本号是从哪来的。
+ *
+ * 上游把 `x-ide-version-code` 当**配置注册表的筛选键**：取值不对不会报错，
+ * 只会静默降级或回 4120。所以「用的是真实 buildId 还是兜底常量」必须能
+ * 一路带到错误文案里 —— 否则用户只看到一句 4120，不知道该去改 TRAE_HOME。
+ */
+export type TraeVersionSource = "credential" | "product" | "fallback";
+
+/** 读不到 product.json 时的统一提示（日志、错误文案、诊断都用它）。 */
+export const TRAE_VERSION_FALLBACK_HINT =
+  `当前用的是内置兜底 buildId ${TRAE_DEFAULT_APP_VERSION_CODE}（Trae 1.107.1 实测值）。` +
+  "没找到本机 Trae 安装目录里的 resources/app/product.json —— 把环境变量 TRAE_HOME 指向 Trae 安装目录后重启 DSH，" +
+  "或把 Trae 装到默认位置（%LOCALAPPDATA%\\Programs\\TRAE SOLO / Program Files\\TRAE SOLO）再点「一键认证」。";
+
+/** 版本号与来源的展示文案（错误提示、账号测试、启动日志共用一处口径）。 */
+export function describeTraeVersion(input: {
+  appVersionCode: number;
+  appVersionSource?: TraeVersionSource;
+  productPath?: string;
+}): { code: number; source: TraeVersionSource; text: string } {
+  const source: TraeVersionSource = input.appVersionSource ?? "credential";
+  const sourceText =
+    source === "product"
+      ? input.productPath !== undefined
+        ? `来自 product.json（${input.productPath}）`
+        : "来自 product.json"
+      : source === "fallback"
+        ? "内置兜底（没读到 product.json）"
+        : "来自凭据文件";
+  return {
+    code: input.appVersionCode,
+    source,
+    text: `build ${input.appVersionCode}，${sourceText}`,
+  };
+}
+
 /** 推理网关的区域表（与 product.json 的 bootConfig.agent 同形）。 */
 export const TRAE_DEFAULT_GATEWAYS: Record<string, string> = {
   normal: "https://core-normal.trae.ai",
@@ -64,6 +101,10 @@ export interface TraeCredential {
   gateway: string;
   appId: string;
   appVersionCode: number;
+  /** 版本号来源：凭据文件 / product.json / 内置兜底。 */
+  appVersionSource?: TraeVersionSource;
+  /** 读到的 product.json 路径（来源为 product 时有值）。 */
+  productPath?: string;
   /** token 过期时间（毫秒）；JWT 里读不到就不带。 */
   expiresAtMs?: number;
   /** 账号区域（US / SG / USTTP …），只用于诊断展示。 */
@@ -85,6 +126,8 @@ interface ProductInfo {
   appId?: string;
   appVersionCode?: number;
   gateways?: Record<string, string>;
+  /** 命中的 product.json 路径（诊断与错误提示要指给用户看）。 */
+  sourcePath?: string;
 }
 
 function readJsonFile(path: string): Record<string, unknown> | undefined {
@@ -141,7 +184,10 @@ export function traeUserDataRoots(): string[] {
 function traeInstallRoots(): string[] {
   const roots: string[] = [];
   const env = process.env.TRAE_HOME?.trim();
-  if (env !== undefined && env !== "") roots.push(env);
+  // TRAE_HOME 一旦设置就是**排他**的：只读它。这样「指定一个没有 product.json
+  // 的目录」才表达得出来（测试、绿色版、装在非常规位置时都用它），也避免
+  // 用户在 A 盘的 Trae 被 D 盘残留的同名目录抢走版本号。
+  if (env !== undefined && env !== "") return [env];
   const localAppData = process.env.LOCALAPPDATA;
   if (localAppData !== undefined && localAppData !== "") roots.push(join(localAppData, "Programs", "TRAE SOLO"));
   const programFiles = process.env.ProgramFiles;
@@ -159,7 +205,7 @@ export function readTraeProductInfo(): ProductInfo {
       if (doc === undefined) continue;
       const boot = doc["bootConfig"];
       const agent = typeof boot === "object" && boot !== null ? (boot as Record<string, unknown>)["agent"] : undefined;
-      const info: ProductInfo = {};
+      const info: ProductInfo = { sourcePath: path };
       if (typeof agent === "object" && agent !== null) {
         const record = agent as Record<string, unknown>;
         const appId = str(record["appId"]);
@@ -247,6 +293,8 @@ export function readTraeSessionFromStorage(storagePath: string): { credential?: 
         gateway: gatewayFor(region, product),
         appId: product.appId ?? TRAE_DEFAULT_APP_ID,
         appVersionCode: product.appVersionCode ?? TRAE_DEFAULT_APP_VERSION_CODE,
+        appVersionSource: product.appVersionCode === undefined ? "fallback" : "product",
+        ...(product.sourcePath === undefined ? {} : { productPath: product.sourcePath }),
         ...(expiresAtMs === undefined || Number.isNaN(expiresAtMs) ? {} : { expiresAtMs }),
         ...(region === undefined ? {} : { region }),
       },
@@ -305,6 +353,7 @@ export function parseTraeCredentialDocument(doc: Record<string, unknown>, source
   if (token === undefined) throw new Error(`凭据文件里没有 token（${source}）`);
   const account = typeof doc["account"] === "object" && doc["account"] !== null ? (doc["account"] as Record<string, unknown>) : {};
   const product = readTraeProductInfo();
+  const docVersion = num(doc["appVersionCode"]);
   const expiresAtMs =
     num(doc["expiresAtMs"]) ??
     (typeof doc["expiredAt"] === "string" ? Date.parse(doc["expiredAt"]) : undefined) ??
@@ -320,7 +369,10 @@ export function parseTraeCredentialDocument(doc: Record<string, unknown>, source
       : { email: str(doc["email"]) ?? str(account["email"]) }),
     gateway: str(doc["gateway"]) ?? gatewayFor(str(doc["region"]), product),
     appId: str(doc["appId"]) ?? product.appId ?? TRAE_DEFAULT_APP_ID,
-    appVersionCode: num(doc["appVersionCode"]) ?? product.appVersionCode ?? TRAE_DEFAULT_APP_VERSION_CODE,
+    appVersionCode: docVersion ?? product.appVersionCode ?? TRAE_DEFAULT_APP_VERSION_CODE,
+    // 凭据文件自带版本号（快照/导入）优先；否则看 product.json；再不行才是兜底。
+    appVersionSource: docVersion !== undefined ? "credential" : product.appVersionCode !== undefined ? "product" : "fallback",
+    ...(docVersion === undefined && product.sourcePath !== undefined ? { productPath: product.sourcePath } : {}),
     ...(expiresAtMs === undefined || Number.isNaN(expiresAtMs) ? {} : { expiresAtMs }),
     ...(str(doc["region"]) === undefined ? {} : { region: str(doc["region"]) }),
     source,

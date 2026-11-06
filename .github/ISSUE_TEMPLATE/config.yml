@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: 邮件反馈（2738769924@qq.com）
+    url: mailto:2738769924@qq.com
+    about: 不想公开贴日志时，把诊断栏的错误原文、DSH 版本与插件版本直接发邮件；不要附 token。

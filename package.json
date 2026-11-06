@@ -2,7 +2,7 @@
   "name": "dsh-model-hub",
   "displayName": "DSH Model Hub",
   "description": "把 WorkBuddy / Trae / Qoder CN 的模型统一接入 DeepSeek Harness，带账号管理与请求记录",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -10,7 +10,8 @@
   },
   "homepage": "https://github.com/lifeiyu-44/dsh-model-hub#readme",
   "bugs": {
-    "url": "https://github.com/lifeiyu-44/dsh-model-hub/issues"
+    "url": "https://github.com/lifeiyu-44/dsh-model-hub/issues",
+    "email": "2738769924@qq.com"
   },
   "keywords": [
     "deepseek",
@@ -96,5 +97,9 @@
       ],
       "platform": "web"
     }
+  },
+  "author": {
+    "name": "lifeiyu-44",
+    "email": "2738769924@qq.com"
   }
 }

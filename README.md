@@ -171,6 +171,7 @@ token 过期（约 14 天）：Trae 里重登一次，再点导入即可；过�
 2. **`%USERPROFILE%\.dsh\model-hub\status.json`**：`ok` / `modelCount` / 失败原因（部署自检也读它）
 3. **账号行**：熔断中（至 HH:mm）/ 上次失败原因 / 测试按钮的 ✓✗
 4. 常见写接口错误：`origin_not_allowed` / `host_not_allowed` = 非本机请求；`bad_request` = 参数不对；`payload_too_large` = body 超 64KB
+5. Trae 报 `4120`：看诊断栏的 build 版本号 —— 显示「内置兜底」说明没读到 `resources/app/product.json`，把 `TRAE_HOME` 指向 Trae 安装目录后重启
 
 ### 已知限制
 
@@ -207,8 +208,16 @@ src/
   channels/trae/           # byteCrypto 解密、本机登录态发现、目录（state.vscdb）、对话方言（event/data 分行 → OpenAI SSE）
   client/                  # 面板：HubCard（四栏）、RecordsModal、AddAccountModal、HelpModal、ModelLabel
 docs/superpowers/          # 设计规格与实现计划
-tests/                     # 285 用例（含真实上游 live 用例，网络不通时会红）
+tests/                     # 336 用例（含真实上游 live 用例，网络不通时会红）
 ```
+
+## 反馈
+
+- **邮箱：2738769924@qq.com** —— 附上诊断栏里的错误原文、DSH 版本、插件版本；不要贴 token / PAT 全文
+- Issue：<https://github.com/lifeiyu-44/dsh-model-hub/issues>
+
+Trae 报 `4120` 时请一并说明：Trae 客户端版本（设置里能看到）、是否设置过 `TRAE_HOME`、以及诊断栏显示的「build 版本号」——
+这三项能直接区分「版本号用了内置兜底」还是「升级后版本对不上」。
 
 ## 许可
 

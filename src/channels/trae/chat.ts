@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 import type { ShimDialect } from "../../shim/server.js";
 import { TRAE_DEFAULT_FUNCTION, decodeTraeModelId } from "./catalog.js";
-import { assertTraeTokenFresh, type TraeCredential } from "./credentials.js";
+import { assertTraeTokenFresh, TRAE_VERSION_FALLBACK_HINT, type TraeCredential } from "./credentials.js";
 
 /**
  * Trae 的对话方言：OpenAI 请求 → Trae 请求，Trae SSE → OpenAI SSE。
@@ -218,8 +218,15 @@ export function buildTraeChatBody(
   return body;
 }
 
+/** Trae 的控制事件里能拿到的版本上下文（用于把 4120 翻译成可执行的提示）。 */
+export interface TraeVersionContext {
+  appVersionCode?: number;
+  appVersionSource?: string;
+  productPath?: string;
+}
+
 /** 上游错误码 → 人话。原始 message 常为空或指不到成因，必须翻译。 */
-export function explainTraeError(code: unknown, message: unknown): string {
+export function explainTraeError(code: unknown, message: unknown, version?: TraeVersionContext): string {
   const text = typeof message === "string" && message !== "" ? message : "";
   const numeric = typeof code === "number" ? code : undefined;
   if (numeric === 2001) {
@@ -230,14 +237,40 @@ export function explainTraeError(code: unknown, message: unknown): string {
   }
   if (numeric === 4001) return "Trae 认为参数非法（自定义 openai-compatible 模型不能走这条通道）";
   if (numeric === 4120) {
-    return "Trae 拒收了这个请求（4120）：多半是客户端身份头缺失（x-ide-version-code / x-app-id）或登录态不完整";
+    /*
+     * 4120 是「客户端身份被拒」，但上游把 message 留空 —— 用户只能看到一句
+     * 没有信息量的错误码。最常见的两个成因：
+     *   1. `x-ide-version-code` 用的是内置兜底 buildId（没读到 product.json）；
+     *   2. Trae 升级/降级后 buildId 与凭据里的版本对不上。
+     * 所以这里必须把「实际用的版本 + 来源」写出来，并给出下一步动作。
+     */
+    if (version?.appVersionSource === "fallback") {
+      return (
+        `Trae 拒收（4120）：客户端版本号用的是内置兜底 build ${version.appVersionCode ?? "未知"}，` +
+        "说明没读到你本机 Trae 的 resources/app/product.json。\n" +
+        TRAE_VERSION_FALLBACK_HINT
+      );
+    }
+    const versionText =
+      version?.appVersionCode === undefined
+        ? "x-ide-version-code 未知"
+        : `x-ide-version-code=${version.appVersionCode}` +
+          (version.appVersionSource === "product"
+            ? `（来自 product.json${version.productPath === undefined ? "" : `：${version.productPath}`}）`
+            : version.appVersionSource === "credential"
+              ? "（来自凭据文件）"
+              : "");
+    return (
+      `Trae 拒收（4120）：客户端身份头被拒，${versionText}。` +
+      "升级/降级过 Trae 的话，在 Trae 里退出重登一次，再回面板点「一键认证」重新导入；仍失败请把这句原文带上反馈。"
+    );
   }
   if (/token|expired|unauthor|login/i.test(text)) return "Trae 登录态失效，请在 Trae 里重新登录后到面板点「一键认证」";
   return text !== "" ? text : numeric === undefined ? "Trae 上游返回了空错误" : `Trae 上游错误码 ${numeric}`;
 }
 
 /** 每个请求一份的解码器（事件名状态不能跨请求）。 */
-export function createTraeEventDecoder(model: string): (line: string) => string | null {
+export function createTraeEventDecoder(model: string, version?: TraeVersionContext): (line: string) => string | null {
   const id = `chatcmpl-trae-${randomBytes(8).toString("hex")}`;
   const created = Math.floor(Date.now() / 1000);
   let event = "";
@@ -368,7 +401,7 @@ export function createTraeEventDecoder(model: string): (line: string) => string 
     }
 
     if (event === "error") {
-      const message = explainTraeError(data["code"], data["message"]);
+      const message = explainTraeError(data["code"], data["message"], version);
       return `data: ${JSON.stringify({ error: { message, type: "trae_error", code: data["code"] ?? null } })}`;
     }
 
@@ -432,7 +465,12 @@ export function createTraeDialect(options: TraeDialectOptions): ShimDialect {
         },
         body: JSON.stringify(body),
         // 每个请求一份解码器：事件名状态不能跨请求串。
-        decodeLine: createTraeEventDecoder(decoded.model),
+        // 版本上下文一并带进去 —— 4120 的文案要指出「用的是哪个 build、从哪来的」。
+        decodeLine: createTraeEventDecoder(decoded.model, {
+          appVersionCode: credential.appVersionCode,
+          ...(credential.appVersionSource === undefined ? {} : { appVersionSource: credential.appVersionSource }),
+          ...(credential.productPath === undefined ? {} : { productPath: credential.productPath }),
+        }),
       };
     },
   };

@@ -9,6 +9,7 @@ import {
   parseTraeCredentialDocument,
   traeTokenDir,
   writeTraeTokenFile,
+  TRAE_DEFAULT_APP_VERSION_CODE,
   type TraeCredential,
 } from "../src/channels/trae/credentials.js";
 import {
@@ -150,6 +151,32 @@ describe("Trae 凭据发现", () => {
     expect(session?.credential.gateway).toBe("https://coreva-test.example");
     expect(session?.credential.appId).toBe("test-app-id");
     expect(session?.credential.appVersionCode).toBe(1205510027010);
+    // 版本号来源要能一路带到错误提示里：读到 product.json 就是 product
+    expect(session?.credential.appVersionSource).toBe("product");
+    expect(session?.credential.productPath).toContain("product.json");
+  });
+
+  it("找不到 product.json 时标记为兜底版本（4120 的提示靠这个分支）", () => {
+    const root = tempDir("userdata-fallback");
+    const emptyApp = tempDir("app-empty");
+    const globalStorage = join(root, "User", "globalStorage");
+    mkdirSync(globalStorage, { recursive: true });
+    const doc = {
+      token: fakeJwt(1_900_000_000),
+      userId: "u-fallback",
+      account: { username: "nobody" },
+    };
+    writeFileSync(
+      join(globalStorage, "storage.json"),
+      JSON.stringify({ "iCubeAuthInfo://icube.cloudide": encryptEnvelope(Buffer.from(JSON.stringify(doc), "utf8")) }),
+    );
+    writeFileSync(join(globalStorage, "state.vscdb"), "");
+    process.env.TRAE_USER_DATA = root;
+    process.env.TRAE_HOME = emptyApp;
+
+    const { session } = discoverTraeSession();
+    expect(session?.credential.appVersionSource).toBe("fallback");
+    expect(session?.credential.appVersionCode).toBe(TRAE_DEFAULT_APP_VERSION_CODE);
   });
 
   it("没有登录态时给出可操作的错误文案", () => {
@@ -442,8 +469,26 @@ describe("Trae SSE 解码", () => {
     expect(done).toContain("[DONE]");
   });
 
-  it("错误码翻译：4120 指向客户端头，2001 指向 function", () => {
+  it("错误码翻译：4120 指向客户端版本与 TRAE_HOME，2001 指向 function", () => {
+    // 没带上下文：至少要把字段名与下一步动作说清楚
     expect(explainTraeError(4120, "")).toContain("x-ide-version-code");
+    // 兜底版本：必须给出「改 TRAE_HOME」的可执行提示，而不是干巴巴一个 4120
+    const fallback = explainTraeError(4120, "", {
+      appVersionCode: TRAE_DEFAULT_APP_VERSION_CODE,
+      appVersionSource: "fallback",
+    });
+    expect(fallback).toContain(String(TRAE_DEFAULT_APP_VERSION_CODE));
+    expect(fallback).toContain("TRAE_HOME");
+    expect(fallback).toContain("product.json");
+    // 来自 product.json：说明版本号来源，不再提 TRAE_HOME
+    const fromProduct = explainTraeError(4120, "", {
+      appVersionCode: 1205510027010,
+      appVersionSource: "product",
+      productPath: "D:\\TRAE SOLO\\resources\\app\\product.json",
+    });
+    expect(fromProduct).toContain("1205510027010");
+    expect(fromProduct).toContain("product.json");
+    expect(fromProduct).not.toContain("TRAE_HOME");
     expect(explainTraeError(2001, "")).toContain("function");
     expect(explainTraeError(undefined, "token expired")).toContain("重新登录");
   });

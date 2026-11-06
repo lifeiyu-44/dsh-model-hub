@@ -24,10 +24,12 @@ import {
 } from "./channels/workbuddy/identity.js";
 import { createSessionManager } from "./channels/qoder/credentials.js";
 import {
+  describeTraeVersion,
   discoverTraeSession,
   readTraeCredentialFile,
   traeAccountSuffixOf,
   traeConnectAuthPath,
+  TRAE_VERSION_FALLBACK_HINT,
   writeTraeTokenFile,
   type TraeCredential,
 } from "./channels/trae/credentials.js";
@@ -52,7 +54,7 @@ export const inject = ["llm"];
  * 因为它是最容易忘记同步的一处（发布时改了 package.json 忘了改这里，
  * 用户报障时看到的版本就是错的）。
  */
-export const PLUGIN_VERSION = "0.2.0";
+export const PLUGIN_VERSION = "0.2.1";
 
 /** 数据库文件字节数；文件还不存在（首次启动）时返回 null，不返回 0。 */
 function fileSizeOrNull(path: string): number | null {
@@ -426,6 +428,13 @@ function applyInner(ctx: any, config: any): void {
         ctx.logger?.info?.(
           `dsh-model-hub: Trae 登录态来自本机客户端（${discovered.session.storagePath}）→ ${tokenPath}`,
         );
+        // 版本号来源要留痕：用兜底 buildId 时上游可能回 4120，日志里先给出成因与修法。
+        const version = describeTraeVersion(discovered.session.credential);
+        if (version.source === "fallback") {
+          ctx.logger?.warn?.(`dsh-model-hub: Trae 客户端版本未知 —— ${TRAE_VERSION_FALLBACK_HINT}`);
+        } else {
+          ctx.logger?.info?.(`dsh-model-hub: Trae 客户端版本 ${version.text}`);
+        }
       } else {
         const snapshot = traeConnectAuthPath(dshHome);
         if (existsSync(snapshot)) {

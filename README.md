@@ -1,6 +1,6 @@
 # dsh-model-hub
 
-把本机 **WorkBuddy（国际/国内）** 与 **Qoder CN** 的模型统一接进 [DeepSeek Harness](https://github.com/deepseek-ai)，带多账号池、凭据自动接管、请求记录与诊断。
+把本机 **WorkBuddy（国际/国内）**、**Trae（SOLO / SOLO CN）** 与 **Qoder CN** 的模型统一接进 [DeepSeek Harness](https://github.com/deepseek-ai)，带多账号池、凭据自动接管、请求记录与诊断。
 
 > 面板内的「?」按钮里有同样的使用说明——不用翻这个文件也能用。
 
@@ -8,10 +8,10 @@
 
 | 能力 | 说明 |
 |---|---|
-| **多平台接入** | WorkBuddy 25 个模型 + Qoder CN 10 个模型并列出现在 DSH 模型选择器里，id 带 `hub-` 前缀（`hub-workbuddy-global/…`、`hub-qoder-cn/…`） |
+| **多平台接入** | WorkBuddy 25 个模型 + Trae 15 个模型 + Qoder CN 10 个模型并列出现在 DSH 模型选择器里，id 带 `hub-` 前缀（`hub-workbuddy-global/…`、`hub-trae/…`、`hub-qoder-cn/…`） |
 | **账号管理** | 面板内增删账号、启用/禁用、设为当前、单账号测试；同一账号按 uid 去重，绝不重复出现 |
 | **多账号池** | 手动优先 + 故障切换（401/402/403/429/5xx 自动换下一个账号，上限 `min(池大小,3)`）+ 熔断（连续 3 次凭据类失败冷却 10 分钟） |
-| **凭据自动接管** | WorkBuddy 桌面端加密登录态由插件**内置解密**（向 App 的 native binding 取密钥，AES-256-GCM 解信封）；Qoder 用 PAT 换 jobToken |
+| **凭据自动接管** | WorkBuddy 桌面端加密登录态由插件**内置解密**（向 App 的 native binding 取密钥，AES-256-GCM 解信封）；Trae 登录态同样是**内置解密**（byteCrypto 信封，纯算法）；Qoder 用 PAT 换 jobToken |
 | **请求记录** | 每次上游尝试一行：token 数、TTFT、tok/s、状态码、**归属账号**；故障切换时失败那次与成功那次都可见 |
 | **全功能界面化** | 记录保留清理、渠道展开模型清单、按账号的今日消耗、认证结果区、使用说明，全部在面板里 |
 
@@ -30,20 +30,12 @@ dsh plugin add github:lifeiyu-44/dsh-model-hub
 指定版本（tag）安装：
 
 ```powershell
-dsh plugin add github:lifeiyu-44/dsh-model-hub#v0.1.0
+dsh plugin add github:lifeiyu-44/dsh-model-hub#v0.2.0
 ```
 
 装完重启 DSH，到 **设置 → 插件 → DSH Model Hub** 配置账号。
 
 > 前置条件：Node.js `^22.19.0 || >=24`，以及 DSH 本体（插件通过 `peerDependencies` 使用宿主的 `@deepseek-ai/dsh-*` 包，不会重复安装）。
-
-### 从 npm 装
-
-包发布后也可以直接按包名安装：
-
-```powershell
-dsh plugin add dsh-model-hub
-```
 
 ### 从源码开发（贡献者）
 
@@ -119,6 +111,25 @@ powershell -ExecutionPolicy Bypass -File scripts\deploy.ps1 -Rollback
 
 面板「+ 添加账号」→ 贴 `pt-…`（到 <https://qoder.com.cn/account/integrations> 新建）→ 插件写 `model-hub/qoder-pats/<slug>.pat`（0600）→ 换 token 验活 → 入库 → 起 runtime。
 
+### Trae（装好客户端就行）
+
+1. 在 **Trae SOLO / SOLO CN** 里登录（国际版、国内版都认）
+2. 回面板「+ 添加账号」点 **扫描本机 Trae 导入**（DSH 启动时也会自动接管一次）
+3. 插件解密 `storage.json` 里的登录态 → 写 `model-hub/trae-tokens/<uid>.json`（0600）→ 按 uid 去重登记
+
+换号：在 Trae 里退出重登，再点一次导入 —— 新账号会多一行，老账号保留。
+token 过期（约 14 天）：Trae 里重登一次，再点导入即可；过期时上游会拒，面板的「测试」会直接把这句话打出来。
+
+> 模型 id 支持 `模型@function` 语法（如 `gpt-5.4@solo_coder`）。默认 function 是 `solo_agent_lite`——
+> 实测它接受全部 15 个预置模型；`solo_work_lite` 的模型表与服务端注册表不一致，不要用它选模型。
+
+工具调用也是通的：请求里的 `tools` 会透传（`parameters` 自动字符串化成 Trae 要的形状），上游回的
+`function_call` 分片翻成 OpenAI `tool_calls`，并把 Trae 的 `finish_reason:"stop"` 改写成 `tool_calls`
+（不改写宿主就不会执行工具）。历史里的 tool_calls 同样转成 Trae 认的 `function_call` 形状。
+
+思考档位：15 个模型都声明支持，档位（minimal/low/medium/high）原样进 `reasoning_effort`；
+「滑动变阻器」皮肤在 Trae 模型上会出滑块，拖到 Low/High 都会即时提交并随下一条请求发出去。
+
 ### 切当前 / 故障切换
 
 「设为当前」= 池头优先；请求失败（凭据类 4xx 或 5xx）自动换池里下一个账号重试，失败那次也记一行（account_id 是失败账号）。连续 3 次凭据类失败 → 熔断 10 分钟，到期自动解冻；全池冷却时仍按序兜底。
@@ -130,6 +141,8 @@ powershell -ExecutionPolicy Bypass -File scripts\deploy.ps1 -Rollback
 | WorkBuddy 桌面端登录态 | `%LOCALAPPDATA%\CodeBuddyExtension\Data\Public\auth\workbuddy-desktop-ai.info` | `$wbEncrypted` 信封；插件以 `ELECTRON_RUN_AS_NODE` 跑 WorkBuddy App 自身、调 `loggerGet()` 取密钥，内存里解密 |
 | 插件自有 token | `%USERPROFILE%\.dsh\model-hub\workbuddy-tokens\<sha256(uid)[:12]>.json` | 解密后的明文，0600；每账号一个文件 |
 | dsh-connect-workbuddy vault | `%USERPROFILE%\.dsh\workbuddy-vault\<region>\<accountId>.json` | **只读**，历史来源 |
+| Trae 登录态 | `%APPDATA%\TRAE SOLO\User\globalStorage\storage.json` 的 `iCubeAuthInfo://icube.cloudide` | byteCrypto AES 信封，插件内置解密；只读，永不回写 |
+| Trae 自有 token | `~/.dsh/model-hub/trae-tokens/<sha256(uid)[:12]>.json` | 解密后的明文快照，0600；每账号一个文件 |
 | Qoder PAT | `~/.dsh/qoder/pat`、`QODERCN_PAT` 等环境变量、`model-hub/qoder-pats/*.pat` | 面板贴的 PAT 落在自有目录 |
 
 **安全边界**：插件数据库只存**凭据引用**（文件路径），绝不存明文；日志与报错统一隐去 token/PAT 全文（只保留文件路径与前 6 位）；桌面端 auth 文件与 vault 永不回写。写接口要求本机回环 + Origin 规则（网页来源必须回环，桌面壳/本地客户端放行）+ JSON content-type + body ≤64KB。
@@ -138,6 +151,7 @@ powershell -ExecutionPolicy Bypass -File scripts\deploy.ps1 -Rollback
 
 - WorkBuddy 目录不提供逐模型 reasoning 标记，但实测上游接受 `reasoning_effort` 参数 → **25 个模型统一声明支持**（不支持的模型上游忽略参数）
 - Qoder 按目录 `is_reasoning` 如实声明
+- Trae 的 15 个预置模型都是 `reasoning_model`（或目录标了 `features.reasoning.enable`）→ **统一声明支持**；`reasoning_effort` 原样进请求体（实测 low/medium/high/minimal/off/none 全 200）。配合「滑动变阻器」皮肤（`dsh-client-liang-intensity-skin`）时，模型目录里每个 Trae 模型带 4 档 effort（minimal/low/medium/high），默认档 high，滑块可直接调
 - 选中支持思考的模型后，DSH 输入框的模型选择器出现「思考强度」（off/minimal/low/medium/high），**按模型记忆**
 - 非 hub 模型（如 zai-coding-cn）是否有档位，取决于其 provider 配置里是否声明 `reasoningEfforts`
 
@@ -164,6 +178,8 @@ powershell -ExecutionPolicy Bypass -File scripts\deploy.ps1 -Rollback
 - 目录拉取失败时渠道保持「无 runtime」，由下一次写操作/重启重试
 - 5xx 触发的请求内换号对非幂等上游有重复副作用的理论可能（上限 min(池,3)）
 - 记录明细上限 2000 行（弹层全部显示靠表格滚动）
+- Trae 没有可读的倍率接口（国际版 `/api/ide/v1/batch_get_detail_param` 是 404），模型名后不带 `x…` 倍率
+- Trae 的模型清单来自本机 `state.vscdb` 缓存：客户端没登录过时只能退回内置名单（15 个预置模型）
 
 ## 开发
 
@@ -188,6 +204,7 @@ src/
   shim/server.ts           # 本机回环 shim：唯一埋点处 + 请求内换号重试
   channels/workbuddy/      # 凭据发现、vault 多账号、at-rest 内置解密、token-store、目录
   channels/qoder/          # PAT→jobToken、COSY 签名、目录、对话方言（请求编码 + 双层 SSE）
+  channels/trae/           # byteCrypto 解密、本机登录态发现、目录（state.vscdb）、对话方言（event/data 分行 → OpenAI SSE）
   client/                  # 面板：HubCard（四栏）、RecordsModal、AddAccountModal、HelpModal、ModelLabel
 docs/superpowers/          # 设计规格与实现计划
 tests/                     # 285 用例（含真实上游 live 用例，网络不通时会红）

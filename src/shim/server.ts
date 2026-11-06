@@ -50,6 +50,10 @@ export interface ShimDialect {
    * 构造最终请求。返回的 `body` 已经是可以直接发出去的字节。
    *
    * 默认实现是 `<baseUrl>/v2/chat/completions` + 原样 body。
+   *
+   * `decodeLine` 是**本次请求专用**的流解码器：像 Trae 那种「事件名单独占
+   * 一行」的上游，解码状态（当前 event）必须按请求隔离 —— 放在 dialect 上
+   * 会让并发请求互相串事件名。只有请求级解码器能表达这件事。
    */
   request?(input: {
     raw: string;
@@ -58,7 +62,12 @@ export interface ShimDialect {
     headers: Record<string, string>;
     /** 本次选中的账号；Qoder 方言靠它取对应账号的会话。 */
     account?: { id: string };
-  }): Promise<{ url: string; headers: Record<string, string>; body: string | Buffer }>;
+  }): Promise<{
+    url: string;
+    headers: Record<string, string>;
+    body: string | Buffer;
+    decodeLine?: (line: string) => string | null;
+  }>;
   /**
    * 把上游的一行 SSE 翻成标准 OpenAI SSE 行；返回 `null` 表示丢弃这一行。
    * 不给就原样透传（当前 WorkBuddy 的行为）。
@@ -145,6 +154,14 @@ export async function startShim(deps: ShimDeps): Promise<ShimHandle> {
     let built!: { url: string; headers: Record<string, string>; body: string | Buffer };
     let account: { id: string } | undefined;
     let upstream!: Response;
+    /**
+     * 本次请求专用的流解码器（方言 `request` 可选返回）。
+     *
+     * 与 `deps.dialect.decodeLine` 的区别是**生命周期**：后者是渠道级的，
+     * 适合无状态翻译（Qoder 的双层信封每行自描述）；前者跟着请求走，
+     * Trae 的 `event:` / `data:` 分行格式靠它才安全（并发请求不会串事件名）。
+     */
+    let requestDecodeLine: ((line: string) => string | null) | undefined;
 
     // 被换掉的中间尝试也要各记一行（规格 §6「每次上游尝试各写一行」）：
     // 不记的话，一次换号请求在记录表里只留最终那行，面板看不到「换过号」，
@@ -189,13 +206,9 @@ export async function startShim(deps: ShimDeps): Promise<ShimHandle> {
         account = prepared.account;
         // 方言钩子存在时由它决定 URL / 头 / 请求体（Qoder 要编码请求体并重签名）；
         // 否则维持原行为。
-        const nextBody =
+        const dialectRequest =
           deps.dialect?.request === undefined
-            ? {
-                url: `${prepared.baseUrl}/v2/chat/completions`,
-                headers: { ...prepared.headers, "content-type": "application/json" },
-                body,
-              }
+            ? undefined
             : await deps.dialect.request({
                 raw: body,
                 model,
@@ -203,6 +216,16 @@ export async function startShim(deps: ShimDeps): Promise<ShimHandle> {
                 headers: prepared.headers,
                 account: prepared.account,
               });
+        const nextBody =
+          dialectRequest === undefined
+            ? {
+                url: `${prepared.baseUrl}/v2/chat/completions`,
+                headers: { ...prepared.headers, "content-type": "application/json" },
+                body,
+              }
+            : dialectRequest;
+        // 每次尝试都重绑：换号重试时上一次的解码器状态（半个事件）不能带过来。
+        requestDecodeLine = dialectRequest?.decodeLine;
         let resp: Response;
         try {
           resp = await fetch(nextBody.url, {
@@ -293,7 +316,7 @@ export async function startShim(deps: ShimDeps): Promise<ShimHandle> {
       const reader = upstream.body.getReader();
       const decoder = new TextDecoder();
       let buffer = "";
-      const decodeLine = deps.dialect?.decodeLine;
+      const decodeLine = requestDecodeLine ?? deps.dialect?.decodeLine;
       for (;;) {
         const { done, value } = await reader.read();
         if (done) break;

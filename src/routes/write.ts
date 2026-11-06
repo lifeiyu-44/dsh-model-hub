@@ -2,7 +2,7 @@ import type { DatabaseSync } from "node:sqlite";
 import { DATA_PREFIX } from "./data.js";
 import { PROVIDER_PREFIX } from "../constants.js";
 import { listVaultEntries } from "../channels/workbuddy/vault.js";
-import { addQoderPat, oneClickAuth, testAccount, type ProberDeps } from "../probe/prober.js";
+import { addQoderPat, importTraeLocal, oneClickAuth, testAccount, type ProberDeps } from "../probe/prober.js";
 import { queryAccounts } from "../store/queries.js";
 import { pruneRequests, clearRecords } from "../store/retention.js";
 import { seedChannelsAndAccounts, type AccountSeed } from "../store/seed.js";
@@ -56,6 +56,7 @@ type WriteVerdict = { ok: true } | { ok: false; status: number; json: unknown };
 /** 账号 id 派生：与 prober.ts / index.ts 同源不同处（不为取常量改别人模块）。 */
 const PROVIDER_GLOBAL = `${PROVIDER_PREFIX}workbuddy-global`;
 const PROVIDER_QODER = `${PROVIDER_PREFIX}qoder-cn`;
+const PROVIDER_TRAE = `${PROVIDER_PREFIX}trae`;
 
 /** 写 body 上限（约束 7）。超限立即 413 并 destroy，绝不能把内存读爆。 */
 const WRITE_BODY_LIMIT = 64 * 1024;
@@ -316,6 +317,20 @@ async function addAccounts(
       return { status: 200, json: { ok: true, added: [accountId] } };
     } catch (error) {
       // 格式不对 / 验活失败都是调用方输入问题：400 + 文案（已 redact，无 PAT 全文）
+      return { status: 400, json: { ok: false, error: messageOf(error) } };
+    }
+  }
+
+  if (channelId === PROVIDER_TRAE) {
+    // Trae 没有可粘贴的 PAT（是 JWT + 产品常量头），唯一入口是「从本机客户端
+    // 导入」：解密 storage.json → 落 token 文件 → 登记 → 起 runtime。
+    try {
+      const result = await importTraeLocal(deps.proberDeps, deps.db, deps.state);
+      return {
+        status: 200,
+        json: { ok: true, added: [result.accountId], detail: `${result.displayName}（${result.path}）` },
+      };
+    } catch (error) {
       return { status: 400, json: { ok: false, error: messageOf(error) } };
     }
   }

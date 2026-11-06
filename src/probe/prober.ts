@@ -12,6 +12,16 @@ import {
   exchangePat as exchangePatLive, listPatFiles, resolveDshHome,
   type QoderSession,
 } from "../channels/qoder/credentials.js";
+import {
+  assertTraeTokenFresh,
+  discoverTraeSession,
+  readTraeCredentialFile,
+  traeAccountSuffixOf,
+  writeTraeTokenFile,
+  type TraeCredential,
+} from "../channels/trae/credentials.js";
+import { fetchTraeCatalog, TRAE_DEFAULT_FUNCTION } from "../channels/trae/catalog.js";
+import { buildTraeChatBody, explainTraeError } from "../channels/trae/chat.js";
 import { seedChannelsAndAccounts, type AccountSeed, type ChannelSeed } from "../store/seed.js";
 import { markAccountResult } from "../store/mutations.js";
 import { queryAccounts } from "../store/queries.js";
@@ -89,6 +99,8 @@ export interface TestAccountResult {
 /** 渠道 id 派生（与 index.ts 同源不同处：那是只读参考，本任务不改它）。 */
 const PROVIDER_GLOBAL = `${PROVIDER_PREFIX}workbuddy-global`;
 const PROVIDER_QODER = `${PROVIDER_PREFIX}qoder-cn`;
+/** Trae 渠道 id（与 index.ts 的 PROVIDER_TRAE 一致）。 */
+export const PROVIDER_TRAE = `${PROVIDER_PREFIX}trae`;
 
 /** 贴 PAT 的格式门：pt- 开头 + 至少 8 位（与简报逐字一致）。 */
 const PAT_PATTERN = /^pt-[A-Za-z0-9_-]{8,}$/;
@@ -475,6 +487,34 @@ export async function oneClickAuth(deps: ProberDeps, db: DatabaseSync, state: Hu
     });
   }
 
+  try {
+    // Trae 与另两家不同：它的凭据只能从**本机客户端**解出来（或来自
+    // connect-auth 快照），所以「一键认证」在这里就是「重新导入一次」——
+    // 顺带把 token 文件刷新成当前登录态。
+    const result = await importTraeLocal(deps, db, state);
+    channels.push({
+      id: PROVIDER_TRAE,
+      status: "ok",
+      sources: [
+        {
+          source: result.path,
+          status: "ok",
+          detail: result.added
+            ? `从本机 Trae 导入 ${result.displayName}（${result.path}）`
+            : `已登记 ${result.displayName}，凭据引用已刷新（${result.path}）`,
+        },
+      ],
+      accountsAdded: result.added ? 1 : 0,
+    });
+  } catch (error) {
+    channels.push({
+      id: PROVIDER_TRAE,
+      status: "missing",
+      sources: [{ source: "trae", status: "missing", detail: redact(messageOf(error), []) }],
+      accountsAdded: 0,
+    });
+  }
+
   return { channels, at: Date.now() };
 }
 
@@ -509,6 +549,8 @@ export async function testAccount(
   try {
     if (row.channel_id === PROVIDER_QODER) {
       detail = await testQoderCredential(deps, row.credential_ref);
+    } else if (row.channel_id === PROVIDER_TRAE) {
+      detail = await testTraeCredential(deps, row.credential_ref);
     } else {
       detail = await testWorkbuddyCredential(deps, row.credential_ref);
     }
@@ -560,6 +602,135 @@ async function testQoderCredential(deps: ProberDeps, ref: string | null): Promis
     throw new Error(redact(messageOf(error), [pat]));
   }
   return `PAT 验活通过（${ref}）`;
+}
+
+// ── Trae ──
+
+/**
+ * Trae 单账号测试：读 token 文件 → 过期预检 → **真发一次最小对话**。
+ *
+ * 为什么不只读文件/看目录：token 存在不等于能用（过期、被顶号、区域不对
+ * 都会 200 + `event:error`）。真打一次上游才能把「能聊天」这件事证出来。
+ *
+ * 模型从本机目录里取前三个依次试：目录是客户端缓存，可能包含当前账号
+ * 不可用的项（`4023 model is unknown`），试到有一个能出事件就算通过 ——
+ * 这是**验活**，不是验模型。
+ */
+async function testTraeCredential(deps: ProberDeps, ref: string | null): Promise<string> {
+  if (ref === null || ref === "") throw new Error("没有 credential_ref");
+  let credential: TraeCredential;
+  try {
+    credential = readTraeCredentialFile(ref);
+  } catch (error) {
+    throw new Error(messageOf(error));
+  }
+  assertTraeTokenFresh(credential);
+
+  const catalog = fetchTraeCatalog(credential);
+  const candidates = catalog.models.slice(0, 3).map((model) => model.id);
+  if (candidates.length === 0) throw new Error("Trae 目录为空，无法验活");
+  const fetchImpl = deps.fetchImpl ?? fetch;
+  let lastError = "";
+
+  for (const model of candidates) {
+    try {
+      const body = buildTraeChatBody(
+        { messages: [{ role: "user", content: "ping" }], max_tokens: 8 },
+        model,
+        TRAE_DEFAULT_FUNCTION,
+        credential,
+      );
+      const response = await fetchImpl(`${credential.gateway.replace(/\/+$/, "")}/api/agent/v3/llm_utils_chat`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          accept: "text/event-stream",
+          authorization: `Cloud-IDE-JWT ${credential.token}`,
+          "x-ide-token": credential.token,
+          "x-ide-version-code": String(credential.appVersionCode),
+          "x-app-id": credential.appId,
+          "user-agent": "TraeClient/TTNet",
+        },
+        body: JSON.stringify(body),
+      });
+      if (!response.ok) {
+        lastError = `上游 HTTP ${response.status}`;
+        continue;
+      }
+      const text = await response.text();
+      if (/event:error/.test(text)) {
+        const payload = /event:error\s*\ndata:([^\n]*)/.exec(text)?.[1] ?? "";
+        let code: unknown;
+        let message: unknown;
+        try {
+          const parsed = JSON.parse(payload) as Record<string, unknown>;
+          code = parsed["code"];
+          message = parsed["message"];
+        } catch {
+          /* 保持空值，交给 explainTraeError 兜底 */
+        }
+        lastError = explainTraeError(code, message);
+        continue;
+      }
+      if (/event:(done|output)/.test(text)) return `Trae 验活通过（${ref}，模型 ${model}）`;
+      lastError = "上游没有返回任何事件";
+    } catch (error) {
+      lastError = messageOf(error);
+    }
+  }
+  throw new Error(redact(lastError === "" ? "Trae 验活失败" : lastError, [credential.token]));
+}
+
+/**
+ * 从**本机 Trae 客户端**导入账号：解密登录态 → 落自有 token 文件 → 登记 → 起 runtime。
+ *
+ * 与启动时的自动接管同一条路径（同一个 discover + write），差别只在于这里是
+ * 用户主动点「添加账号」触发的，所以失败要**如实抛给面板**（启动路径只记日志）。
+ * 同一账号重复导入是幂等的：按 uid 派生的 id 认领已有行，只刷新名字与凭据引用。
+ */
+export async function importTraeLocal(
+  deps: ProberDeps,
+  db: DatabaseSync,
+  state: HubState,
+): Promise<{ accountId: string; path: string; added: boolean; displayName: string }> {
+  const home = deps.dshHome ?? resolveDshHome();
+  const discovered = discoverTraeSession();
+  if (discovered.session === undefined) {
+    throw new Error(discovered.error ?? "没有找到 Trae 登录态");
+  }
+  const credential = discovered.session.credential;
+  assertTraeTokenFresh(credential);
+
+  const path = writeTraeTokenFile(home, credential);
+  const uid = credential.userId;
+  const derivedId = `${PROVIDER_TRAE}:${uid !== "" ? traeAccountSuffixOf(uid) : "local"}`;
+  const existing = db
+    .prepare("SELECT id, deleted FROM accounts WHERE id = ? OR credential_ref = ? LIMIT 1")
+    .get(derivedId, path) as { id: string; deleted: number } | undefined;
+  // 软删的账号不复活：seed 的守卫会拦下 INSERT，这里如实报「已存在，未新增」。
+  if (existing !== undefined && existing.deleted === 1) {
+    throw new Error("该 Trae 账号曾被删除（软删），面板里不再恢复；换号登录后再导入");
+  }
+  const accountId = existing?.id ?? derivedId;
+  const channelHasLive = (queryAccounts(db) as { channel_id: string }[]).some(
+    (account) => account.channel_id === PROVIDER_TRAE,
+  );
+  const displayName = credential.name !== "" ? credential.name : `Trae · ${uid.slice(0, 8)}`;
+  seedChannelsAndAccounts(
+    db,
+    [{ id: PROVIDER_TRAE, kind: "trae", displayName: "Trae" }],
+    [
+      {
+        id: accountId,
+        channelId: PROVIDER_TRAE,
+        displayName,
+        credentialRef: path,
+        isCurrent: !channelHasLive,
+      },
+    ],
+  );
+  if (state.poolSize(PROVIDER_TRAE) > 0) await state.ensureRuntime(PROVIDER_TRAE);
+  return { accountId, path, added: existing === undefined, displayName };
 }
 
 // ── addQoderPat ──

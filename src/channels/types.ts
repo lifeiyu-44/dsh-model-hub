@@ -13,7 +13,12 @@ export interface ChannelModel {
   name: string;
   contextWindow: number;
   maxTokens: number;
-  creditMultiplier: number;
+  /**
+   * 上游给的消耗倍率。**可以没有** —— Qoder / WorkBuddy 的目录里带倍率，
+   * Trae 的倍率注册表在国际版是 404（没有可读来源），如实缺席比编一个
+   * `x0.00` 好：面板与模型名都会在缺值时跳过这一段。
+   */
+  creditMultiplier?: number;
   supportsImages: boolean;
   /** 上游给的活动标记文案，如 `Free now`。没有就不带。 */
   promotionBadge?: string;

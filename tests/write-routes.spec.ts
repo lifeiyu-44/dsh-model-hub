@@ -31,6 +31,7 @@ import { dispatchWrite, registerWriteRoutes, writeGate, type WriteDeps } from ".
 
 const GLOBAL_CHANNEL = "hub-workbuddy-global";
 const QODER_CHANNEL = "hub-qoder-cn";
+const TRAE_CHANNEL = "hub-trae";
 const DAY = 86_400_000;
 
 // ── 环境夹具 ──
@@ -602,7 +603,7 @@ describe("dispatchWrite · 分发边界与账号增删", () => {
 
       expect(out.status).toBe(200);
       const doc = out.json as { channels: { id: string; status: string; accountsAdded: number }[]; at: number };
-      expect(doc.channels.map((c) => c.id)).toEqual([GLOBAL_CHANNEL, QODER_CHANNEL]);
+      expect(doc.channels.map((c) => c.id)).toEqual([GLOBAL_CHANNEL, QODER_CHANNEL, TRAE_CHANNEL]);
       expect(doc.channels.every((c) => c.status === "missing")).toBe(true);
       expect(doc.channels.every((c) => c.accountsAdded === 0)).toBe(true);
       expect(typeof doc.at).toBe("number");

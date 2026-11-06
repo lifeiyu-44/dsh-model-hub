@@ -615,7 +615,12 @@ export function HubCard(): React.ReactElement {
     addModalFor !== undefined
       ? h(AddAccountModal, {
           channelId: addModalFor,
-          kind: channels.find((c) => c.id === addModalFor)?.kind === "qoder" ? "qoder" : "workbuddy",
+          kind:
+            channels.find((c) => c.id === addModalFor)?.kind === "qoder"
+              ? "qoder"
+              : channels.find((c) => c.id === addModalFor)?.kind === "trae"
+                ? "trae"
+                : "workbuddy",
           onClose: () => setAddModalFor(undefined),
           onDone: () => {
             // 简报口径：成功 = 父组件刷新数据 + 关弹窗

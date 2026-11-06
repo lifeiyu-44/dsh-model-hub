@@ -40,6 +40,8 @@ function statusBadge(code: number | null): React.ReactElement {
 function shortChannel(id: string): string {
   const tail = id.replace(/^hub-/, "");
   if (tail.startsWith("workbuddy")) return `WB-${tail.includes("cn") ? "CN" : "Global"}`;
+  if (tail.startsWith("qoder")) return "Qoder";
+  if (tail.startsWith("trae")) return "Trae";
   return tail;
 }
 

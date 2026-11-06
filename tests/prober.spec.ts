@@ -24,6 +24,7 @@ import {
 
 const GLOBAL_CHANNEL = "hub-workbuddy-global";
 const QODER_CHANNEL = "hub-qoder-cn";
+const TRAE_CHANNEL = "hub-trae";
 
 // ── 夹具 ──
 
@@ -153,7 +154,7 @@ describe("oneClickAuth · WorkBuddy", () => {
     const report = await oneClickAuth({}, database, state);
 
     expect(typeof report.at).toBe("number");
-    expect(report.channels.map((c) => c.id)).toEqual([GLOBAL_CHANNEL, QODER_CHANNEL]);
+    expect(report.channels.map((c) => c.id)).toEqual([GLOBAL_CHANNEL, QODER_CHANNEL, TRAE_CHANNEL]);
     const wb = channelOf(report, GLOBAL_CHANNEL);
     expect(wb.status).toBe("missing");
     expect(wb.accountsAdded).toBe(0);

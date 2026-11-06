@@ -39,7 +39,7 @@ const SECTIONS: HelpSection[] = [
     blocks: [
       {
         kind: "lead",
-        text: "把本机 WorkBuddy（国际/国内）与 Qoder CN 的模型接进 DSH 的模型选择器，模型 id 带 hub- 前缀。所有请求经插件自己的本机回环 shim 转发 —— 记录（token / TTFT / tok·s / 状态码）只在那一层埋点，所以只有走 hub- 模型的对话才会出现在这里。",
+        text: "把本机 WorkBuddy（国际/国内）、Trae 与 Qoder CN 的模型接进 DSH 的模型选择器，模型 id 带 hub- 前缀。所有请求经插件自己的本机回环 shim 转发 —— 记录（token / TTFT / tok·s / 状态码）只在那一层埋点，所以只有走 hub- 模型的对话才会出现在这里。",
       },
       {
         kind: "list",
@@ -66,6 +66,7 @@ const SECTIONS: HelpSection[] = [
           ["插件自有 token", "~/.dsh/model-hub/workbuddy-tokens/，每账号一文件，权限 0600"],
           ["connect-workbuddy", "~/.dsh/workbuddy-vault/ 历史 vault，只读"],
           ["Qoder PAT", "~/.dsh/qoder/pat、环境变量，或面板里贴的 PAT（存 model-hub/qoder-pats/，0600）"],
+          ["Trae 登录态", "本机 Trae 客户端的 storage.json（byteCrypto 信封，插件内置解密），或 ~/.dsh/connect-auth/trae.json 快照；解密后落 model-hub/trae-tokens/，0600"],
         ],
       },
       {
@@ -82,6 +83,7 @@ const SECTIONS: HelpSection[] = [
         items: [
           "WorkBuddy：在桌面端换登另一个账号 → 点「一键认证」→ 解密验活后按账号 uid 自动新增一行；同一个账号重复认证只刷新那一行，不会重复出现",
           "Qoder：面板「+ 添加账号」贴 pt- 开头的 PAT，备注名留空就用 userinfo 真名做显示名",
+          "Trae：在 Trae 桌面端登录好 → 面板「+ 添加账号」点「扫描本机 Trae 导入」（启动时也会自动接管一次）",
           "设为当前决定池头：请求优先用它；它失败（401/402/403/429）自动切池里下一个，连续 3 次失败熔断 10 分钟",
           "账号行 meta 里的「今日 N 次 · X tokens」是按账号统计的消耗，切换过账号也能分清是谁的",
         ],
@@ -96,6 +98,7 @@ const SECTIONS: HelpSection[] = [
         items: [
           "WorkBuddy 25 个模型统一声明支持思考档位（上游接受 reasoning_effort 参数，不支持的模型会忽略它）",
           "Qoder 按目录 is_reasoning 如实声明",
+          "Trae 的 15 个模型统一声明思考档位：上游接受 reasoning_effort（low/medium/high/minimal/off/none 都回 200，不认的模型自己忽略），所以滑动变阻器在 Trae 模型上出滑块，选中的档位会原样透传给 Trae",
           "选中支持思考的模型后，输入框的模型选择器里出现「思考强度」（off/minimal/low/medium/high），且按模型记忆",
           "非 hub 模型（如 zai-coding-cn）是否有档位，取决于它自己的 provider 配置有没有声明 reasoningEfforts",
         ],

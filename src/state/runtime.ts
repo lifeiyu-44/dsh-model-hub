@@ -10,6 +10,9 @@ import { DESKTOP_UA, conversationIdentityHeaders, fetchCatalog, upstreamBase } f
 import { createSessionManager, type QoderSession } from "../channels/qoder/credentials.js";
 import { fetchQoderCatalog } from "../channels/qoder/catalog.js";
 import { createQoderDialect } from "../channels/qoder/chat.js";
+import { readTraeCredentialFile, type TraeCredential } from "../channels/trae/credentials.js";
+import { fetchTraeCatalog } from "../channels/trae/catalog.js";
+import { createTraeDialect } from "../channels/trae/chat.js";
 import type { ChannelModel } from "../channels/types.js";
 import type { SelectorRow } from "./selector.js";
 
@@ -321,6 +324,26 @@ export async function startChannelRuntime(deps: ChannelRuntimeDeps): Promise<Run
     return manager.current();
   }
 
+  /**
+   * Trae：按 credential_ref 现读 token 文件（0600 明文，插件自己的目录）。
+   *
+   * 每次现读而不是缓存：用户在 Trae 里换号/重登后，面板「一键认证」会重写
+   * 这个文件；缓存住凭据等于让新票在重启前一直不生效。
+   * 读不到/格式坏一律返回 undefined —— 由调用方（prepare / 目录）决定报错文案，
+   * 这里不抛，免得一条坏文件把整个 runtime 打成不可用。
+   */
+  async function traeCredentialFor(accountId: string | undefined): Promise<TraeCredential | undefined> {
+    const target = accountId ?? state.pick(channelId)?.id;
+    if (target === undefined) return undefined;
+    const ref = credentialRefOf(db, target);
+    if (ref === null) return undefined;
+    try {
+      return readTraeCredentialFile(ref);
+    } catch {
+      return undefined;
+    }
+  }
+
   /** WorkBuddy：按 credential_ref 现读 auth 文件（裁定：非 plain / 无 token 抛错，shim 外层 catch 转 502）。 */
   async function prepareWorkbuddy(accountId: string) {
     const ref = credentialRefOf(db, accountId);
@@ -350,6 +373,13 @@ export async function startChannelRuntime(deps: ChannelRuntimeDeps): Promise<Run
       // 方言模式：URL/头/体全由 dialect.request 决定，这里只贯通选中的账号。
       return { baseUrl: "https://qoder.invalid", headers: {}, account: { id: row.id } };
     }
+    if (kind === "trae") {
+      // 同上：Trae 的 URL/头/体全在方言里（含 x-ide-* 三件套），这里不拼。
+      if ((await traeCredentialFor(row.id)) === undefined) {
+        throw new Error(`账号 ${row.id} 的 Trae 凭据不可用（token 文件缺失或已失效）`);
+      }
+      return { baseUrl: "https://trae.invalid", headers: {}, account: { id: row.id } };
+    }
     return prepareWorkbuddy(row.id);
   }
 
@@ -362,6 +392,14 @@ export async function startChannelRuntime(deps: ChannelRuntimeDeps): Promise<Run
       if (session === undefined) throw new Error(`账号 ${head.id} 的 Qoder 凭据不可用（PAT 缺失或交换失败）`);
       const result = await fetchQoderCatalog(session);
       if (result.error !== undefined) throw new Error(`Qoder 目录拉取失败：${result.error}`);
+      return result.models;
+    }
+    if (kind === "trae") {
+      const credential = await traeCredentialFor(head.id);
+      if (credential === undefined) throw new Error(`账号 ${head.id} 的 Trae 凭据不可用（token 文件缺失或已失效）`);
+      const result = fetchTraeCatalog(credential);
+      if (result.error !== undefined) logger.warn?.(`dsh-model-hub: ${channelId} ${result.error}`);
+      if (result.models.length === 0) throw new Error("Trae 目录为空（本机缓存与内置名单都没有可用模型）");
       return result.models;
     }
     const ref = credentialRefOf(db, head.id);
@@ -407,9 +445,14 @@ export async function startChannelRuntime(deps: ChannelRuntimeDeps): Promise<Run
 
   const shim = await startShim({
     prepare,
-    // 只有 Qoder 需要两层改写（请求体编码 + 双层 SSE 解包）；其余 kind 走
-    // OpenAI 兼容直通，与 index.ts 现状一致。
-    ...(kind === "qoder" ? { dialect: createQoderDialect({ sessionFor: (account) => qoderSessionFor(account?.id) }) } : {}),
+    // 只有 Qoder / Trae 需要改写：Qoder 两层信封、Trae 事件名与数据分行。
+    // 其余 kind 走 OpenAI 兼容直通，与 index.ts 现状一致。
+    ...(kind === "qoder"
+      ? { dialect: createQoderDialect({ sessionFor: (account) => qoderSessionFor(account?.id) }) }
+      : {}),
+    ...(kind === "trae"
+      ? { dialect: createTraeDialect({ credentialFor: (account) => traeCredentialFor(account?.id) }) }
+      : {}),
     maxAttempts: () => Math.min(3, state.poolSize(channelId)),
     onAccountResult: (account, ok, status, error) => {
       state.reportResult(channelId, account.id, ok, status, error);

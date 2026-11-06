@@ -23,7 +23,7 @@ const PAT_PATTERN = /^pt-[A-Za-z0-9_-]{8,}$/;
 
 export function AddAccountModal(props: {
   channelId: string;
-  kind: "workbuddy" | "qoder";
+  kind: "workbuddy" | "qoder" | "trae";
   onClose: () => void;
   onDone: () => void;
 }): React.ReactElement {
@@ -70,8 +70,9 @@ export function AddAccountModal(props: {
         ...(props.kind === "qoder" && displayName.trim() !== "" ? { displayName: displayName.trim() } : {}),
       });
       if ("added" in doc && Array.isArray(doc.added)) {
-        if (props.kind === "workbuddy") {
-          // WB：把扫到的账号亮出来再让用户关——静默关闭会让「到底导入了几个」无从对账
+        if (props.kind !== "qoder") {
+          // 导入型渠道（WorkBuddy / Trae）：把导到的账号亮出来再让用户关——
+          // 静默关闭会让「到底导入了几个」无从对账
           setAdded(doc.added);
         } else {
           props.onDone();
@@ -112,28 +113,36 @@ export function AddAccountModal(props: {
             h(
               "div",
               { className: "dmh-card-desc" },
-              props.kind === "qoder" ? "粘贴 Qoder CN 的 Personal Access Token" : "从 WorkBuddy vault 只读导入已有凭据",
+              props.kind === "qoder"
+                ? "粘贴 Qoder CN 的 Personal Access Token"
+                : props.kind === "trae"
+                  ? "从本机 Trae 客户端导入登录态"
+                  : "从 WorkBuddy vault 只读导入已有凭据",
             ),
           ),
           h("button", { className: "dmh-btn dmh-icon", onClick: dismiss, "aria-label": "关闭" }, "×"),
         ),
-        props.kind === "workbuddy"
+        props.kind !== "qoder"
           ? h(
               "div",
               { className: "dmh-form" },
               h(
                 "div",
                 { className: "dmh-note" },
-                "扫描本机 WorkBuddy vault，把里面还没有登记的账号导入到渠道 ",
+                props.kind === "trae"
+                  ? "扫描本机 Trae 的登录态（解密它自己的本地存储），把当前账号导入到渠道 "
+                  : "扫描本机 WorkBuddy vault，把里面还没有登记的账号导入到渠道 ",
                 h("span", { className: "dmh-strong" }, props.channelId),
-                "。凭据文件保持只读，不会被改写。",
+                props.kind === "trae"
+                  ? "。Trae 自己的文件只读，不会被改写。"
+                  : "。凭据文件保持只读，不会被改写。",
               ),
               added !== undefined
                 ? h(
                     "div",
                     { className: "dmh-note" },
                     added.length === 0
-                      ? "没有新账号：vault 里的条目都已登记过。"
+                      ? "没有新账号：本机登录态里的账号都已登记过。"
                       : [
                           `已导入 ${added.length} 个账号：`,
                           h("div", { key: "ids" }, added.join(" · ")),
@@ -149,7 +158,7 @@ export function AddAccountModal(props: {
                   : h(
                       "button",
                       { className: "dmh-btn dmh-primary", disabled: busy, onClick: () => void submit() },
-                      busy ? "扫描中…" : "扫描 vault 导入",
+                      busy ? "扫描中…" : props.kind === "trae" ? "扫描本机 Trae 导入" : "扫描 vault 导入",
                     ),
               ),
             )

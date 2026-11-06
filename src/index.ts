@@ -1,4 +1,4 @@
-import { readFileSync, statSync } from "node:fs";
+import { readFileSync, statSync, existsSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -23,6 +23,14 @@ import {
   type TokenIdentity,
 } from "./channels/workbuddy/identity.js";
 import { createSessionManager } from "./channels/qoder/credentials.js";
+import {
+  discoverTraeSession,
+  readTraeCredentialFile,
+  traeAccountSuffixOf,
+  traeConnectAuthPath,
+  writeTraeTokenFile,
+  type TraeCredential,
+} from "./channels/trae/credentials.js";
 import { createHubState } from "./state/hub-state.js";
 import {
   startChannelRuntime,
@@ -44,7 +52,7 @@ export const inject = ["llm"];
  * 因为它是最容易忘记同步的一处（发布时改了 package.json 忘了改这里，
  * 用户报障时看到的版本就是错的）。
  */
-export const PLUGIN_VERSION = "0.1.0";
+export const PLUGIN_VERSION = "0.2.0";
 
 /** 数据库文件字节数；文件还不存在（首次启动）时返回 null，不返回 0。 */
 function fileSizeOrNull(path: string): number | null {
@@ -58,6 +66,8 @@ function fileSizeOrNull(path: string): number | null {
 const PROVIDER_GLOBAL = `${PROVIDER_PREFIX}workbuddy-global`;
 /** Qoder CN 渠道的 provider id。 */
 const PROVIDER_QODER = `${PROVIDER_PREFIX}qoder-cn`;
+/** Trae 渠道的 provider id。 */
+const PROVIDER_TRAE = `${PROVIDER_PREFIX}trae`;
 
 /** 保留清理周期（24h）；每次触发现读最新的 `settings.retentionDays`。 */
 const RETENTION_INTERVAL_MS = 24 * 3_600_000;
@@ -390,6 +400,84 @@ function applyInner(ctx: any, config: any): void {
       }
     } catch (error) {
       ctx.logger?.warn?.("dsh-model-hub: Qoder 渠道初始化失败（WorkBuddy 不受影响）", error);
+    }
+
+    // ── 3c. Trae 渠道 ──
+    //
+    // 凭据来源优先级：
+    //   1. **本机 Trae 客户端**：解 `User/globalStorage/storage.json` 的
+    //      `iCubeAuthInfo://icube.cloudide`（byteCrypto 信封，纯算法可解）——
+    //      装了 Trae 并登录过就能直接接管，用户不用导任何文件。
+    //   2. `$DSH_HOME/connect-auth/trae.json`：dsh-connect 时代的明文快照，
+    //      已经导过的机器继续可用。
+    // 解出来的 token 落到我们自己的 `model-hub/trae-tokens/<uid>.json`（0600），
+    // credential_ref 指向它 —— 与 WorkBuddy 的 token-store 同口径：不吃别的
+    // 插件的目录，也不把 token 写进数据库。
+    //
+    // Trae 的请求要过一层方言 shim（`config_name` 选模型 + `event:`/`data:`
+    // 分行翻译），任何问题都不得拖垮另外两个渠道。
+    try {
+      const discovered = discoverTraeSession();
+      let credential: TraeCredential | undefined;
+      let tokenPath: string | undefined;
+      if (discovered.session !== undefined) {
+        tokenPath = writeTraeTokenFile(dshHome, discovered.session.credential);
+        credential = { ...discovered.session.credential, source: tokenPath };
+        ctx.logger?.info?.(
+          `dsh-model-hub: Trae 登录态来自本机客户端（${discovered.session.storagePath}）→ ${tokenPath}`,
+        );
+      } else {
+        const snapshot = traeConnectAuthPath(dshHome);
+        if (existsSync(snapshot)) {
+          try {
+            const parsed = readTraeCredentialFile(snapshot);
+            tokenPath = writeTraeTokenFile(dshHome, parsed);
+            credential = { ...parsed, source: tokenPath };
+            ctx.logger?.info?.(`dsh-model-hub: Trae 凭据来自 connect-auth 快照（${snapshot}）→ ${tokenPath}`);
+          } catch (error) {
+            ctx.logger?.warn?.(`dsh-model-hub: Trae 快照不可用（${snapshot}）`, error);
+          }
+        }
+      }
+
+      if (credential === undefined || tokenPath === undefined) {
+        // 没有本机登录态 ≠ 渠道必死：用户可能只经面板导过，账号行还在池里。
+        if (state.poolSize(PROVIDER_TRAE) > 0) {
+          await state.ensureRuntime(PROVIDER_TRAE);
+        } else {
+          ctx.logger?.warn?.(`dsh-model-hub: ${discovered.error ?? "没有 Trae 登录态"}；Trae 渠道不注册`);
+        }
+      } else {
+        const uid = credential.userId;
+        const suffix =
+          uid !== ""
+            ? traeAccountSuffixOf(uid)
+            : createHash("sha256").update(tokenPath, "utf8").digest("hex").slice(0, 12);
+        const derivedId = `${PROVIDER_TRAE}:${suffix}`;
+        // 按「凭据文件路径」或「派生 id」认领已有行 —— 同一账号换文件名
+        // （老快照导入 → 后来本机接管）不该在面板上变成两行。
+        const existing = db
+          .prepare("SELECT id FROM accounts WHERE deleted = 0 AND (credential_ref = ? OR id = ?) LIMIT 1")
+          .get(tokenPath, derivedId) as { id: string } | undefined;
+        const accountId = existing?.id ?? derivedId;
+        const channelHasLive = queryAccounts(db).some((account) => account.channel_id === PROVIDER_TRAE);
+        seedChannelsAndAccounts(
+          db,
+          [{ id: PROVIDER_TRAE, kind: "trae", displayName: "Trae" }],
+          [
+            {
+              id: accountId,
+              channelId: PROVIDER_TRAE,
+              displayName: credential.name !== "" ? credential.name : `Trae · ${uid.slice(0, 8)}`,
+              credentialRef: tokenPath,
+              isCurrent: !channelHasLive,
+            },
+          ],
+        );
+        await state.ensureRuntime(PROVIDER_TRAE);
+      }
+    } catch (error) {
+      ctx.logger?.warn?.("dsh-model-hub: Trae 渠道初始化失败（WorkBuddy / Qoder 不受影响）", error);
     }
 
     // ── 4. 保留清理：启动跑一次 + 每 24h（每次现读最新设置）──
